@@ -95,6 +95,47 @@ def learning_context(agent):
 
 # ---------------------------------------------------------------- analysis
 
+def _obj(v, text_key):
+    """Claude sometimes returns a nested object as a JSON string or as plain text. Always give back a dict."""
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            return {text_key: v.strip()} if v.strip() else {}
+    return v if isinstance(v, dict) else {}
+
+
+def _list(v, text_key):
+    """Same for arrays: accept a JSON string, a single object, or items given as plain strings."""
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            v = [v]
+    if isinstance(v, dict):
+        v = [v]
+    return [x for x in (_obj(i, text_key) for i in (v if isinstance(v, list) else [])) if x]
+
+
+def normalize_analysis(r):
+    r = _obj(r, "summary")
+    r["relevant"] = r.get("relevant") in (True, "true", "True", 1)
+    r["company"] = _obj(r.get("company"), "name")
+    r["role"] = _obj(r.get("role"), "title")
+    r["detected_signals"] = [x for x in _list(r.get("detected_signals"), "evidence") if x.get("type")]
+    r["facts"] = _list(r.get("facts"), "statement")
+    r["scores"] = _list(r.get("scores"), "reason")
+    r["contacts"] = _list(r.get("contacts"), "title")
+    ps = r.get("potential_services")
+    if isinstance(ps, str):
+        try:
+            ps = json.loads(ps)
+        except ValueError:
+            ps = [x.strip() for x in ps.split(",")]
+    r["potential_services"] = [str(x) for x in ps] if isinstance(ps, list) else []
+    return r
+
+
 def analysis_tool(agent):
     crit = [c["key"] for c in criteria(agent)]
     props = {
@@ -172,6 +213,7 @@ Call record_analysis."""
     except Exception as e:
         d.update("signals", signal_id, {"status": "error", "error": str(e)[:500]})
         raise
+    r = normalize_analysis(r)
     log(d, s["opportunity_id"], "analysis", {"signal": signal_id, "web_search": searched})
     if not r.get("relevant"):
         d.update("signals", signal_id, {"status": "irrelevant", "error": r.get("irrelevance_reason") or "Not relevant"})
@@ -198,7 +240,7 @@ Call record_analysis."""
            "breakdown": breakdown,
            "detected": [{"type": x["type"], "evidence": x.get("evidence", ""), "basis": basis(x.get("basis"))} for x in r.get("detected_signals", [])],
            "facts": [{"statement": x.get("statement", ""), "basis": basis(x.get("basis"))} for x in r.get("facts", [])],
-           "services": r.get("potential_services") or [], "role": r.get("role") or {},
+           "services": [x for x in r["potential_services"] if x in agent["services"]] if agent["key"] == "lit" else [], "role": r["role"],
            "next_step": r.get("next_step") or "", "researched": 1 if searched else 0}
     named = [c for c in r.get("contacts", []) if (c.get("name") or "").strip()]
     opp_id = s["opportunity_id"]
