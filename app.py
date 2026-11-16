@@ -397,7 +397,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    seed_sources()
+    if db.DATABASE_URL and not db.DATABASE_URL.startswith("postgres"):
+        sys.exit("DATABASE_URL is set but is not a Postgres connection string. It must start with postgresql://")
+    try:
+        seed_sources()
+    except Exception as e:
+        if db.DATABASE_URL:
+            sys.exit(f"Could not connect to the database with DATABASE_URL: {type(e).__name__}: {str(e)[:300]}")
+        raise
     # Signals left mid-analysis by a previous shutdown go back to the queue.
     for a in AGENTS.values():
         db.agent_db(a).run("UPDATE signals SET status='new' WHERE status='analyzing'")

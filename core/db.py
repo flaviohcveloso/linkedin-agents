@@ -47,7 +47,14 @@ CREATE TABLE IF NOT EXISTS network(
 """
 
 JSON_COLS = {"breakdown", "detected", "facts", "services", "role", "config", "lint", "data"}
-DATABASE_URL = (os.environ.get("DATABASE_URL") or "").strip()
+def _clean_url(raw):
+    """Neon's Connect dialog shows `psql 'postgresql://...'`; accept that paste as well as the bare URL."""
+    raw = (raw or "").strip()
+    m = re.search(r"postgres(?:ql)?://[^\s'\"]+", raw)
+    return m.group(0) if m else raw
+
+
+DATABASE_URL = _clean_url(os.environ.get("DATABASE_URL"))
 TABLES = "signals|opportunities|contacts|messages|events|sources|meta|settings|runs|network"
 
 
