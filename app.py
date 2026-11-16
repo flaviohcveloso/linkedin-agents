@@ -116,6 +116,19 @@ def migrate():
         for src in car.all("SELECT * FROM sources WHERE type IN('remotive','remoteok')"):
             car.update("sources", src["id"], {"config": dict(src["config"] or {}, brazil_ok=True)})
         car.run("INSERT INTO meta(key,value) VALUES('remote_only','1')")
+    if not car.val("SELECT value FROM meta WHERE key='tracks_v2'"):
+        # Career: new priority tracks, keywords for them, postings from the last 14 days, extra job feed.
+        urls = set()
+        for src in car.all("SELECT * FROM sources"):
+            cfg = src["config"] or {}
+            urls.add(cfg.get("url"))
+            if src["type"] in ("remotive", "remoteok"):
+                car.update("sources", src["id"], {"config": dict(cfg, keywords=sources.CAREER_WORDS, brazil_ok=True, max_age_days=14)})
+        for d in sources.DEFAULT_SOURCES["career"]:
+            if d["type"] == "rss" and d["config"]["url"] not in urls:
+                car.insert("sources", dict(d, enabled=1))
+        car.run("DELETE FROM meta WHERE key='criteria'")  # weights saved for the old rubric no longer apply
+        car.run("INSERT INTO meta(key,value) VALUES('tracks_v2','1')")
 
 
 def status():
@@ -246,6 +259,7 @@ def route(method, path, q, body):
             for o in rows:
                 o["contact"] = d.one("SELECT name,title,basis FROM contacts WHERE opportunity_id=? ORDER BY (name!='') DESC, id LIMIT 1", (o["id"],))
                 o["messages"] = d.val("SELECT COUNT(*) FROM messages WHERE opportunity_id=? AND status!='rejected'", (o["id"],))
+                o["link"] = d.val("SELECT url FROM signals WHERE id=?", (o["signal_id"],)) or ""
             return rows
         if method == "GET" and rest[2:] == ["ics"]:
             o = opp_detail(agent, ident)

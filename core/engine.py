@@ -189,12 +189,18 @@ def analysis_tool(agent):
         props["potential_services"] = {"type": "array", "items": {"type": "string", "enum": agent["services"]}}
     else:
         props["role"] = {"type": "object", "properties": {
-            "title": {"type": "string", "description": "Posted role, or the role Flávio could plausibly fill."},
-            "category": {"type": "string", "enum": ["Growth", "Business Development", "Marketing", "Web3 Ecosystem", "Creative & Agency Growth", "Other"]},
+            "title": {"type": "string", "description": "Posted role title, or the role Flávio could plausibly fill."},
+            "category": {"type": "string", "enum": agent["tracks"], "description": "Which priority track this belongs to."},
             "has_public_opening": {"type": "boolean"},
-            "salary": {"type": "string", "description": "Only if publicly stated in the source; else empty."},
+            "level": {"type": "string", "description": "Entry, Mid, Senior or Lead as the posting implies; 'not stated' if unclear."},
+            "salary": {"type": "string", "description": "Only if stated in the source; otherwise 'not stated'."},
             "remote": {"type": "string", "enum": ["Remote worldwide", "Remote with region limits", "Hybrid or on-site", "Unknown"]},
-            "location": {"type": "string"}}, "required": ["title", "category", "has_public_opening", "remote"]}
+            "brazil_evidence": {"type": "string", "description": "Whether someone living in Brazil can be hired, with the words from the posting that show it; 'not stated' if the posting does not say."},
+            "location": {"type": "string"},
+            "published": {"type": "string", "description": "Posting date as given in the source (YYYY-MM-DD if possible); 'not stated' if absent."},
+            "why_fit": {"type": "string", "description": "One line: why this matches Flávio."},
+            "highlights": {"type": "array", "items": {"type": "string"}, "description": "Exactly 2 points from Flávio's profile to stress in an application for this role."}},
+            "required": ["title", "category", "has_public_opening", "level", "salary", "remote", "brazil_evidence", "published", "why_fit", "highlights"]}
     return {"name": "record_analysis", "description": "Record the structured assessment of this signal.",
             "input_schema": {"type": "object", "properties": props, "required": ["relevant", "scores", "detected_signals", "facts", "contacts"]}}
 
@@ -591,7 +597,7 @@ def run_monitor(agent, trigger="manual", only_source=None):
                 for it in items:
                     if added >= 25:
                         break
-                    it["kind"] = sources.SOURCE_TYPES[src["type"]]["kind"]
+                    it["kind"] = (src["config"] or {}).get("kind") or sources.SOURCE_TYPES[src["type"]]["kind"]
                     if ingest(agent, it, "retrieved", src):
                         added += 1
                 new += added

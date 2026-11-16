@@ -42,7 +42,7 @@ class Mock(BaseHTTPRequestHandler):
                        "contacts": [{"name": "Jane Doe", "title": "Founder", "basis": "stated_in_source", "why": "Decision maker", "linkedin_url": "https://www.linkedin.com/in/janedoe/"},
                                     {"name": "", "title": "Head of Marketing", "basis": "stated_in_source", "why": "Owns brand"}],
                        "next_step": "Connect with Jane", "potential_services": ["Branding & Brand Identity"],
-                       "role": {"title": "Growth Manager", "category": "Growth", "has_public_opening": False, "remote": "Hybrid or on-site" if "ONSITE" in src else "Unknown"}}
+                       "role": {"title": "SDR", "category": "2. SDR / BDR", "has_public_opening": True, "level": "Entry", "salary": "not stated", "brazil_evidence": "LATAM welcome", "published": "2026-11-14", "why_fit": "Outbound to founders", "highlights": ["9 deals closed", "3 years of outbound"], "remote": "Hybrid or on-site" if "ONSITE" in src else "Unknown"}}
         else:
             inp = {"signal_reference": "Seed round", "why_this_makes_sense": "Fresh funding", "angle": "Funding Congratulation",
                    "suggested_message": "Congrats on the round, Jane. Our services could help.", "alternative_message": "Alt version",
@@ -78,7 +78,7 @@ if db.backend() == "sqlite":
 else:
     names = {r["schema_name"] for r in db.system_db().all("SELECT schema_name FROM information_schema.schemata")}
     ok({"lit", "career", "system"} <= names and db.agent_db(AGENTS["lit"]).val("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='lit' AND table_name='opportunities'") == 1, "separate Postgres schema per agent")
-ok(len(R("GET", "/api/lit/sources")) == 5 and len(R("GET", "/api/career/sources")) == 2, "default sources seeded once per agent")
+ok(len(R("GET", "/api/lit/sources")) == 5 and len(R("GET", "/api/career/sources")) == 3, "default sources seeded once per agent")
 from core import sources as _src
 ok(all(x["type"] == "rss" for x in R("GET", "/api/lit/sources")), "Lit sources are funding news feeds only, no job boards")
 ok(not _src.location_ok({"brazil_ok": True}, "USA Only") and _src.location_ok({"brazil_ok": True}, "Worldwide") and _src.location_ok({"brazil_ok": True}, "") and _src.location_ok({"brazil_ok": True}, "LATAM, Europe") and _src.location_ok({}, "USA Only"), "Career job filter drops remote jobs that exclude Brazil")
@@ -129,7 +129,7 @@ ok("His version: Congrats on the seed round, Jane." in CALLS[-1]["messages"][0][
 r = R("POST", "/api/career/signals", {"kind": "linkedin_post", "body": "Acme Protocol founder Jane Doe: we are growing the team", "author": "Jane Doe", "analyze": True})
 co = R("GET", f"/api/career/opportunities/{r['result']['opportunity_id']}")
 ok(co["signal"]["provenance"] == "user_provided" and co["stage"] == "Contact Identified", "career capture labelled user-provided, stage Contact Identified")
-ok(len(co["breakdown"]) == 8 and "Flávio Veloso" in CALLS[-1]["system"] and "Lit Collective, a Web3-focused" not in CALLS[-1]["system"], "career uses its own rubric and persona")
+ok(len(co["breakdown"]) == 7 and "Flávio Veloso" in CALLS[-1]["system"] and "Lit Collective, a Web3-focused" not in CALLS[-1]["system"], "career uses its own rubric and persona")
 ok(bool(co["conflict"]) and bool(R("GET", f"/api/lit/opportunities/{o['id']}")["conflict"]), "identity guard: same company in both pipelines flagged on both sides")
 co = R("POST", f"/api/career/opportunities/{co['id']}/draft", {"contact_id": co["contacts"][0]["id"], "type": "founder_dm"})
 cm = co["messages"][0]
@@ -141,12 +141,16 @@ R("POST", f"/api/career/messages/{cm['id']}", {"action": "sent"})
 ok(R("GET", f"/api/career/opportunities/{co['id']}")["stage"] == "Message Sent", "career: sent DM -> Message Sent")
 r = R("POST", "/api/career/signals", {"kind": "job_posting", "body": "LOWSCORE Senior Solidity engineer at Other Co", "analyze": True})
 low = R("GET", f"/api/career/opportunities/{r['result']['opportunity_id']}")
-ok(low["parked"] == 1 and low["classification"] == "Low relevance" and low["score"] == 16, "low score parked off the board")
+ok(low["parked"] == 1 and low["classification"] == "Low relevance" and low["score"] == 14, "low score parked off the board")
 ok(raises(lambda: R("POST", "/api/career/signals", {"kind": "job_posting", "body": "LOWSCORE Senior Solidity engineer at Other Co"}), app.HttpError), "duplicate capture rejected")
 
 r = R("POST", "/api/career/signals", {"kind": "job_posting", "body": "ONSITE Growth Manager at Gamma, office in Berlin", "analyze": True})
 ok(r["result"]["relevant"] is False and "remote" in r["result"]["reason"].lower() or db.agent_db(car).one("SELECT status, error FROM signals WHERE id=?", (r["id"],))["status"] == "irrelevant", "Career rejects a hybrid or on-site role")
-ok("REMOTE ONLY" in CALLS[-1]["system"], "remote-only rule is in the Career instructions")
+ok("MANDATORY: 100% remote" in CALLS[-1]["system"] and "9 deals closed" in CALLS[-1]["system"], "remote rule and new profile are in the Career instructions")
+ok(co["role"]["highlights"] == ["9 deals closed", "3 years of outbound"] and co["role"]["category"] == "2. SDR / BDR" and co["role"]["brazil_evidence"] == "LATAM welcome", "role keeps track, Brazil evidence and the two points to highlight")
+from datetime import datetime, timedelta, timezone
+old_d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(); new_d = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%a, %d %b %Y %H:%M:%S +0000")
+ok(not _src.recent({"max_age_days": 14}, old_d) and _src.recent({"max_age_days": 14}, new_d) and _src.recent({"max_age_days": 14}, "") and _src.recent({}, old_d), "postings older than 14 days are skipped")
 
 # --- connections import
 csvtext = "Notes:\n\"When exporting...\"\n\nFirst Name,Last Name,URL,Email Address,Company,Position,Connected On\nJohn,Roe,https://www.linkedin.com/in/johnroe,,Beta,CEO,01 Jan 2025\n"

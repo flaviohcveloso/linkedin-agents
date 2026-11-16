@@ -1,11 +1,16 @@
 """The two agents. Each has its own database, persona, scoring model, pipeline and message types.
 Nothing in this file is shared between them except the shape of the config."""
 
-PROFILE_FLAVIO = """Flávio Veloso — Business Development and Sales at Lit Collective (a Web3-focused creative and design agency).
-Experience: Web3 and crypto markets; identifying and qualifying B2B opportunities; outbound prospecting and lead
-generation; relationship building with founders and decision-makers; sales pipeline management; proposal development
-and commercial strategy; international clients; exposure to branding, creative services, marketing and growth;
-developing commercial strategy for a Web3 design agency."""
+PROFILE_FLAVIO = """Flávio Veloso — based in Brazil, bilingual (English and Portuguese).
+- Business Development at LIT Collective (branding and design studio for technology companies) since Jan 2025.
+- SDR at LIT Collective, Oct 2022 to Jan 2025: outbound prospecting, qualification, calls with founders and CEOs.
+- 9 deals closed through outbound, in-person events and inbound (e.g. Theoriq AI, SynFutures, DeFi Education Fund,
+  LaunchMyNFT), covering branding, UI/UX and Webflow.
+- Social media and content writing for LIT since Jun 2025 (X and LinkedIn): 1.7M+ impressions, 44.2K engagements;
+  led a team of 3.
+- Experience with crypto/web3, AI and SaaS. Open to roles in ANY sector, not only crypto."""
+
+TRACKS = ["1. BD in agency or studio", "2. SDR / BDR", "3. Partnerships / BD in web3 or AI", "4. Marketing and content", "Other"]
 
 LIT = {
     "key": "lit",
@@ -82,15 +87,15 @@ CAREER = {
     "opportunity_noun": "opportunity",
     "bands": [[90, "Excellent opportunity"], [75, "Strong opportunity"], [50, "Potential opportunity"], [0, "Low relevance"]],
     "criteria": [
-        {"key": "experience_fit", "label": "Compatibility with experience", "max": 20},
-        {"key": "career_goals", "label": "Relevance to career goals", "max": 15},
+        {"key": "experience_fit", "label": "Compatibility with experience and level", "max": 20},
+        {"key": "track_fit", "label": "Fit with priority tracks (1 highest to 4)", "max": 20},
+        {"key": "remote_compatibility", "label": "Fully remote and open to Brazil / LATAM", "max": 20},
+        {"key": "hiring_signals", "label": "Hiring signals and how recent the posting is", "max": 10},
         {"key": "company_stage", "label": "Company stage", "max": 10},
-        {"key": "web3_relevance", "label": "Web3 relevance", "max": 10},
-        {"key": "remote_compatibility", "label": "Remote compatibility", "max": 15},
-        {"key": "hiring_signals", "label": "Hiring signals", "max": 10},
         {"key": "growth_potential", "label": "Potential for professional growth", "max": 10},
         {"key": "likelihood", "label": "Likelihood of being considered", "max": 10},
     ],
+    "tracks": TRACKS,
     "signal_types": ["public_job_opening", "team_expansion_announcement", "funding_round", "growth_marketing_hiring",
                      "product_launch", "founder_seeking_talent", "ecosystem_expansion", "new_bd_function",
                      "unadvertised_need", "other"],
@@ -116,39 +121,45 @@ CAREER = {
     "capture_kinds": ["job_posting", "linkedin_post", "linkedin_profile", "company_news", "note"],
     "lint_forbidden": ["our agency", "our studio", "lit collective can", "our design team", "our services",
                        "creative partnership", "we could help you with"],
-    "system": """You are the career strategist for Flávio Veloso.
+    "system": """You are Flávio Veloso's job-search assistant. Find REMOTE, INTERNATIONAL roles that accept candidates
+living in Brazil and match his profile.
 
 """ + PROFILE_FLAVIO + """
 
-He wants to grow beyond traditional SDR responsibilities. Target directions (not an exhaustive title list — find adjacent
-roles where his experience is relevant):
-1. Growth: associate, manager, growth marketing, growth operations, strategist.
-2. Business development: BD manager/associate, partnerships, strategic partnerships, BDR, account executive.
-3. Marketing: associate, strategist, Web3 marketing, go-to-market, marketing operations, content and growth strategy.
-4. Web3 ecosystem: ecosystem growth/partnerships, community growth, startup partnerships, venture ecosystem roles.
-5. Creative and agency growth: agency growth, client partnerships, account management, creative business development.
-Best fit combines commercial strategy, growth, marketing and Web3.
+What to look for, in priority order:
+1. Business development in an agency or studio. Titles: Business Development Manager, Business Development
+   Representative (agency), New Business Associate, Partnerships Associate. Where: branding / design / web studios,
+   Webflow agencies, marketing and growth agencies.
+2. SDR / BDR, entry or mid level. Titles: SDR, BDR, Sales Development Representative, Business Development
+   Representative, Outbound SDR. Where: B2B SaaS, AI, fintech and web3 startups. Avoid roles asking for 5+ years of
+   experience or a leadership position.
+3. Partnerships / BD at web3 and AI companies. Titles: Partnerships Associate, BD Associate, Ecosystem Associate.
+4. Marketing and content, entry level. Titles: Marketing Assistant, Marketing Coordinator, Content Writer, Copywriter,
+   Social Media Assistant, Social Media Coordinator. Where: B2B companies, SaaS, AI, agencies.
+Track 1 scores highest on track fit, track 4 lowest; a role outside all four scores near zero there. Any sector is fine.
 
-Target companies: Web3 startups, blockchain and crypto infrastructure, DeFi, AI startups, DePIN, fintech, venture-backed
-tech, Web3 VCs, creative and marketing agencies, international startups.
+MANDATORY: 100% remote AND open to people living in Brazil or Latin America. Set relevant=false (with the reason) when a
+role is on-site or hybrid, or "remote" but requires living in, or holding a visa / work authorization for, the US, UK
+or EU, or any region that excludes Brazil. Good signs: "LATAM", "worldwide", "anywhere", "contractor", "Deel",
+"Remote.com", "EST/PST overlap". English as the working language is fine. Quote the evidence for Brazil eligibility; if
+the posting does not say, write "not stated" and score remote compatibility cautiously.
 
-REMOTE ONLY. Flávio is based in Brazil and only considers fully remote roles he can do from Brazil. Set relevant=false
-(with the reason) when a role is on-site or hybrid, or when it is remote but explicitly limited to countries or regions
-that exclude Brazil (for example "US only", "EU residents", "must be based in the UK"). Keep roles that are remote
-worldwide, remote in the Americas / LATAM, or remote with no stated restriction, and say which it is. For companies with
-no public vacancy, keep them only if the company is known or stated to hire remotely.
+Prefer postings from the last 7 days; older postings lose points on hiring signals. Roles asking for 5+ years or people
+management are a stretch: score experience fit and likelihood low.
 
-Also recognise unadvertised opportunities: e.g. a startup that just raised, is expanding its ecosystem and hiring
-marketers may need growth, partnerships or BD capacity even with no posted vacancy. Mark that reasoning as a hypothesis.
+Never invent roles, salaries, dates or requirements. If something is not in the posting, write "not stated".
 
-Be honest on likelihood: his background is BD/sales at an agency; senior or deeply technical roles are a stretch.
-In these conversations Flávio is a professional exploring career opportunities. He is NOT selling Lit Collective's
+Published vacancies come first. A company with no public vacancy may be kept only when the source shows strong hiring
+signals for one of the four tracks and remote hiring; mark has_public_opening=false and label the reasoning a hypothesis.
+
+In these conversations Flávio is a professional exploring career opportunities. He is NOT selling LIT Collective's
 services. Never pitch agency work.""",
-    "draft_style": """Tone: confident, warm, specific, concise. Never desperate, never a generic applicant. Position
-Flávio as someone who understands Web3, commercial strategy, growth and relationship building, and show it through one
-concrete observation about the company rather than adjectives about himself. Mention his current role naturally and
-briefly. No emoji, no bullet lists, no "I hope this finds you well", no attaching a CV unprompted. The goal is a
-conversation. Never pitch Lit Collective's services or propose an agency engagement.""",
+    "draft_style": """Tone: confident, warm, specific, concise. Never desperate, never a generic applicant. Show fit
+through one concrete observation about the company and at most one concrete proof point from his record (for example
+9 deals closed with founders and CEOs, a named client such as Theoriq AI or SynFutures, or 1.7M+ impressions on LIT's
+content) chosen to match the role's track. Mention his current role naturally and briefly. No emoji, no bullet lists,
+no "I hope this finds you well", no attaching a CV unprompted. The goal is a conversation. Never pitch LIT Collective's
+services or propose an agency engagement.""",
 }
 
 AGENTS = {"lit": LIT, "career": CAREER}

@@ -1,6 +1,6 @@
 "use strict";
 const AG = ["lit", "career"];
-const S = { cfg: null, status: null, page: "dashboard", agent: "lit", tab: "list", inboxTab: "review", inboxAgent: "all", f: { q: "", band: "", stage: "", industry: "", parked: false }, showIrrelevant: false, d: { lit: {}, career: {} }, drawer: null };
+const S = { cfg: null, status: null, page: "dashboard", agent: "lit", tab: "list", inboxTab: "review", inboxAgent: "all", f: { q: "", band: "", stage: "", industry: "", track: "", parked: false }, showIrrelevant: false, d: { lit: {}, career: {} }, drawer: null };
 const $ = (s) => document.querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const safeUrl = (u) => (/^https?:\/\//i.test(u || "") ? u : "");
@@ -96,6 +96,7 @@ function vDash() {
       <div class="kpis"><div><div class="big">${m.opportunities}</div><span>${k === "lit" ? "leads identified" : "opportunities identified"}</span></div>
         <div class="hot"><div class="big">${m.top_band}</div><span>scoring 90+</span></div><div><div class="big">${m.high_band}</div><span>scoring 75+</span></div></div>
       <div class="funnel">${o[k].funnel.map(([l, v]) => `<span class="mute">${esc(l)}</span><div class="track"><i style="width:${(100 * v) / max}%"></i></div><b>${v}</b>`).join("")}</div></section>`; };
+  const top3 = (S.d.career.opps || []).filter((x) => !x.parked && x.score >= 50 && !C("career").closed_stages.includes(x.stage)).slice(0, 3);
   const actions = AG.flatMap((k) => o[k].actions.map((x) => ({ ...x, agent: k }))).sort((x, y) => y.score - x.score).slice(0, 8);
   const feed = AG.flatMap((k) => o[k].activity.map((e) => ({ ...e, agent: k }))).sort((x, y) => (x.at < y.at ? 1 : -1)).slice(0, 10);
   const evt = (e) => ({ stage: "moved to " + (e.data.to || ""), drafted: "message drafted", approved: "message approved", sent: "message sent", reply: "reply logged: " + (e.data.reply || "") }[e.type] || e.type);
@@ -107,6 +108,9 @@ function vDash() {
       ${todo(n((m) => m.status === "drafted"), "drafts to review", "review")}${todo(n((m) => m.status === "approved"), "approved, ready to send", "send")}${todo(follow, "follow-ups due", "waiting")}
       <div class="todo ${waiting ? "" : "zero"}" data-a="page" data-v="agent" data-agent="lit" data-tab="signals"><b>${waiting}</b><span>signals awaiting analysis</span></div></section>
     ${tile("lit")}${tile("career")}
+    ${top3.length ? `<section class="card c12 career"><div class="tile-top"><h2><span class="dot career"></span>Top roles for Flávio right now</h2><button class="btn sm" data-a="page" data-v="agent" data-agent="career">All roles</button></div>
+      <div class="grid2" style="grid-template-columns:repeat(${top3.length},1fr)">${top3.map((o) => { const r = o.role || {}; return `<div class="row" style="margin:0" data-a="open" data-agent="career" data-id="${o.id}">${scoreDot(o.score)}<div class="body"><div class="co">${esc(r.title || o.headline)}</div><div class="mute">${esc(o.company)}, ${esc(r.category || "")}</div>
+        <div style="margin:4px 0">${esc(r.why_fit || "")}</div>${(r.highlights || []).map((h) => `<div class="mute">Highlight: ${esc(h)}</div>`).join("")}</div></div>`; }).join("")}</div></section>` : ""}
     <section class="card c8"><div class="tile-top"><h2>Who to contact next</h2></div>
       ${actions.length ? actions.map((x) => `<div class="row ${x.agent}" data-a="open" data-agent="${x.agent}" data-id="${x.opp}">${scoreDot(x.score)}<div class="body">
         <div class="sp"><div><span class="co">${esc(x.company)}</span> <span class="mute">${esc(x.who || "")}</span></div><span class="chip acc">${esc(x.label)}</span></div><div class="mute">${esc((x.detail || "").slice(0, 190))}</div></div></div>`).join("")
@@ -132,19 +136,26 @@ function vAgent() {
 }
 function vList(a, D) {
   const f = S.f, q = f.q.toLowerCase(), inds = [...new Set(D.opps.map((o) => o.industry).filter(Boolean))].sort();
-  const list = D.opps.filter((o) => !!o.parked === f.parked && (!f.band || o.score >= +f.band) && (!f.stage || o.stage === f.stage) && (!f.industry || o.industry === f.industry) && (!q || (o.company + " " + o.headline + " " + (o.contact ? o.contact.name : "")).toLowerCase().includes(q)));
+  const list = D.opps.filter((o) => !!o.parked === f.parked && (!f.band || o.score >= +f.band) && (!f.stage || o.stage === f.stage) && (a.key === "career" ? !f.track || (o.role || {}).category === f.track : !f.industry || o.industry === f.industry) && (!q || (o.company + " " + o.headline + " " + (o.contact ? o.contact.name : "")).toLowerCase().includes(q)));
   const opt = (v, l, cur) => `<option value="${esc(v)}" ${cur === v ? "selected" : ""}>${esc(l)}</option>`;
   return `<div class="filters"><input type="search" placeholder="Search company or person" value="${esc(f.q)}" data-f="q">
       <select data-f="band">${opt("", "Any score", f.band)}${a.bands.slice(0, 3).map(([n, l]) => opt(String(n), `${l} (${n}+)`, f.band)).join("")}</select>
       <select data-f="stage">${opt("", "Any stage", f.stage)}${a.stages.slice(1).map((s) => opt(s, s, f.stage)).join("")}</select>
-      <select data-f="industry">${opt("", "Any industry", f.industry)}${inds.map((s) => opt(s, s, f.industry)).join("")}</select>
+      ${a.key === "career" ? `<select data-f="track">${opt("", "Any track", f.track)}${a.tracks.map((s) => opt(s, s, f.track)).join("")}</select>` : `<select data-f="industry">${opt("", "Any industry", f.industry)}${inds.map((s) => opt(s, s, f.industry)).join("")}</select>`}
       <div class="seg"><button class="${f.parked ? "" : "on"}" data-a="parkedf" data-v="">Active</button><button class="${f.parked ? "on" : ""}" data-a="parkedf" data-v="1">Low priority</button></div><span class="mute">${list.length} shown</span></div>
-  <div class="tablewrap ${a.key}"><table style="min-width:860px"><tr><th>Score</th><th>Company</th><th>${a.key === "lit" ? "Signals and services" : "Role and signals"}</th><th>Who to contact</th><th>Status</th><th>Next step</th></tr>
-    ${list.map((o) => `<tr class="click" data-a="open" data-agent="${a.key}" data-id="${o.id}"><td>${scoreDot(o.score)}</td>
+  ${a.key === "career" ? `<div class="tablewrap career"><table style="min-width:1080px"><tr><th>Score</th><th>Role and company</th><th>Track</th><th>Remote, accepts Brazil?</th><th>Level</th><th>Salary</th><th>Published</th><th>Why it fits</th><th>Status</th></tr>
+    ${list.map((o) => { const r = o.role || {}; return `<tr class="click" data-a="open" data-agent="career" data-id="${o.id}"><td>${scoreDot(o.score)}</td>
+      <td><b>${esc(r.title || o.headline)}</b>${o.conflict && !o.conflict_ack ? ' <span class="chip b-bad">identity conflict</span>' : ""}<br><small>${esc(o.company)}, ${esc(o.industry)}</small>${safeUrl(o.link) ? `<br><a href="${esc(o.link)}" target="_blank" rel="noopener"><small>Open posting</small></a>` : ""}</td>
+      <td><span class="chip acc">${esc(r.category || "Other")}</span>${r.has_public_opening === false ? '<br><span class="chip b-hyp">no public vacancy</span>' : ""}</td>
+      <td><span class="chip ${r.remote === "Remote worldwide" ? "b-ok" : ""}">${esc(r.remote || "Unknown")}</span><br><small>${esc(r.brazil_evidence || "not stated")}</small></td>
+      <td><small>${esc(r.level || "not stated")}</small></td><td><small>${esc(r.salary || "not stated")}</small></td><td><small>${esc(r.published || "not stated")}</small></td>
+      <td><small>${esc(r.why_fit || (o.next_step || "").slice(0, 110))}</small></td><td>${pill(a, o.stage)}<br><small>${esc(o.classification)}</small></td></tr>`; }).join("") || `<tr><td colspan="9"><div class="empty">${D.opps.length ? "Nothing matches these filters." : "No opportunities yet. Capture a job posting or run monitoring."}</div></td></tr>`}</table></div>`
+  : `<div class="tablewrap lit"><table style="min-width:860px"><tr><th>Score</th><th>Company</th><th>Signals and services</th><th>Who to contact</th><th>Status</th><th>Next step</th></tr>
+    ${list.map((o) => `<tr class="click" data-a="open" data-agent="lit" data-id="${o.id}"><td>${scoreDot(o.score)}</td>
       <td><b>${esc(o.company)}</b>${o.conflict && !o.conflict_ack ? ' <span class="chip b-bad">identity conflict</span>' : ""}<br><small>${esc(o.industry)}, ${esc(o.company_stage)}</small></td>
-      <td>${a.key === "career" && o.role && o.role.title ? `<b>${esc(o.role.title)}</b> <span class="chip">${esc(o.role.remote || "")}</span>${o.role.salary ? `<span class="chip">${esc(o.role.salary)}</span>` : ""}<br>` : ""}${(o.detected || []).map((x) => `<span class="chip">${esc(nice(x.type))}</span>`).join("")}${(o.services || []).map((x) => `<span class="chip acc">${esc(x)}</span>`).join("")}</td>
+      <td>${(o.detected || []).map((x) => `<span class="chip">${esc(nice(x.type))}</span>`).join("")}${(o.services || []).map((x) => `<span class="chip acc">${esc(x)}</span>`).join("")}</td>
       <td>${o.contact ? (o.contact.name ? `${esc(o.contact.name)}<br><small>${esc(o.contact.title)}</small>` : `<small>Find: ${esc(o.contact.title)}</small>`) : "<small>to identify</small>"}</td>
-      <td>${pill(a, o.stage)}<br><small>${esc(o.classification)}</small></td><td><small>${esc((o.next_step || "").slice(0, 110))}</small></td></tr>`).join("") || `<tr><td colspan="6"><div class="empty">${D.opps.length ? "Nothing matches these filters." : `No ${esc(a.opportunity_noun)}s yet. Capture a signal or run monitoring.`}</div></td></tr>`}</table></div>`;
+      <td>${pill(a, o.stage)}<br><small>${esc(o.classification)}</small></td><td><small>${esc((o.next_step || "").slice(0, 110))}</small></td></tr>`).join("") || `<tr><td colspan="6"><div class="empty">${D.opps.length ? "Nothing matches these filters." : "No leads yet. Capture a signal or run monitoring."}</div></td></tr>`}</table></div>`}`;
 }
 function vSignals(a, D) {
   const sig = (s) => `<div class="fact"><div class="sp"><div><b>${esc(s.title || nice(s.kind))}</b> ${badge(s.provenance === "retrieved" ? "stated_in_source" : "user_provided", s.provenance)}<span class="chip ${s.status === "error" ? "b-bad" : ""}">${esc(s.status === "irrelevant" ? "not relevant" : s.status)}</span></div><small>${esc(s.source_name)}, ${day(s.created_at)}</small></div>
@@ -244,7 +255,10 @@ function vDrawer(o, a) {
         <div><label>${a.key === "lit" ? "Meeting" : "Interview"} date</label><div class="btns" style="flex-wrap:nowrap"><input type="datetime-local" data-change="meeting" value="${esc(o.meeting_at || "")}">${o.meeting_at ? `<a class="btn sm" href="/api/${a.key}/opportunities/${o.id}/ics" download="${a.key}-${o.id}.ics">Add to calendar</a>` : ""}</div></div></div>
       <div class="btns" style="margin-top:10px"><button class="btn sm" data-a="research" ${S.status.claude ? "" : "disabled"} title="Uses Anthropic's web search; billed per search on your API account">Research on the public web</button>
         <button class="btn sm" data-a="park" data-v="${o.parked ? 0 : 1}">${o.parked ? "Move back to pipeline" : "Park as low priority"}</button>${o.researched ? '<span class="chip b-web">web-researched</span>' : ""}</div></div>
-    ${a.key === "career" && r.title ? `<h3>Role</h3><div class="card"><b>${esc(r.title)}</b> <span class="chip acc">${esc(r.category || "")}</span><span class="chip">${r.has_public_opening ? "Public opening" : "No public vacancy (inferred need)"}</span><span class="chip">${esc(r.remote || "Unknown")}</span>${r.location ? `<span class="chip">${esc(r.location)}</span>` : ""}<div class="mute">Salary: ${esc(r.salary || "not publicly stated")}</div></div>` : ""}
+    ${a.key === "career" && r.title ? `<h3>Role</h3><div class="card"><div class="sp"><b>${esc(r.title)}</b>${o.signal && safeUrl(o.signal.url) ? `<a class="btn sm" href="${esc(o.signal.url)}" target="_blank" rel="noopener">Open posting</a>` : ""}</div>
+      <div style="margin:6px 0"><span class="chip acc">${esc(r.category || "Other")}</span><span class="chip ${r.has_public_opening ? "" : "b-hyp"}">${r.has_public_opening ? "Public opening" : "No public vacancy (inferred need)"}</span><span class="chip ${r.remote === "Remote worldwide" ? "b-ok" : ""}">${esc(r.remote || "Unknown")}</span></div>
+      <dl class="meta"><dt>Accepts Brazil?</dt><dd>${esc(r.brazil_evidence || "not stated")}</dd><dt>Level</dt><dd>${esc(r.level || "not stated")}</dd><dt>Salary</dt><dd>${esc(r.salary || "not stated")}</dd><dt>Published</dt><dd>${esc(r.published || "not stated")}</dd><dt>Why it fits</dt><dd>${esc(r.why_fit || "not stated")}</dd></dl>
+      ${(r.highlights || []).length ? `<label>Highlight in your application</label>${r.highlights.map((h) => `<div class="fact">${esc(h)}</div>`).join("")}` : ""}</div>` : ""}
     ${a.key === "lit" && (o.services || []).length ? `<h3>Potential services</h3><div>${o.services.map((x) => `<span class="chip acc">${esc(x)}</span>`).join("")}</div>` : ""}
     <h3>Score: ${o.score} of 100</h3><div class="card">${(o.breakdown || []).map((b) => `<div class="bar-row"><span>${esc(b.label)}</span><div class="track"><i style="width:${b.max ? (100 * b.points) / b.max : 0}%"></i></div><b>${b.points}/${b.max}</b><div class="reason">${esc(b.reason)}</div></div>`).join("")}</div>
     <h3>${a.key === "lit" ? "Buying" : "Hiring"} signals</h3><div class="card">${(o.detected || []).map((x) => `<div class="fact"><span class="chip acc">${esc(nice(x.type))}</span>${badge(x.basis, prov)}<div>${esc(x.evidence)}</div></div>`).join("") || '<span class="mute">None recorded.</span>'}</div>
