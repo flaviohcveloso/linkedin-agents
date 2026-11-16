@@ -59,6 +59,13 @@ redesigns, new product development, market expansion, increased marketing activi
 recommendations. Judge the context behind a signal, not keywords: a company hiring its fifth in-house designer needs an
 agency less than a two-person team that just raised a seed round and has a launch in eight weeks.
 
+Priority: companies that recently RECEIVED INVESTMENT (pre-seed to Series B, grants, strategic rounds). Fresh funding is the
+strongest buying signal: it means budget, a launch or scale-up ahead, and pressure to look credible. Score funded companies
+highest on buying signals and timing, and name the round, amount and investors when the source states them. A job posting
+on its own (a company hiring a designer or marketer) is a weak signal: score it low on buying signals unless the same
+source also shows funding, a launch or a rebrand. Mark a signal not relevant when it is only a job advert with no
+funding or launch context.
+
 Outreach is sent by Flávio Veloso from his personal LinkedIn account, as a representative of Lit Collective exploring
 design and creative partnerships. He is NOT looking for a job in these conversations. Never mention career interests.""",
     "draft_style": """Tone: friendly, natural, professional, concise, consultative, not salesy. The goal is to start a
@@ -123,9 +130,13 @@ roles where his experience is relevant):
 Best fit combines commercial strategy, growth, marketing and Web3.
 
 Target companies: Web3 startups, blockchain and crypto infrastructure, DeFi, AI startups, DePIN, fintech, venture-backed
-tech, Web3 VCs, creative and marketing agencies, international startups. He is based in Brazil and needs remote roles
-from companies that hire internationally, especially US and Europe based. A role restricted to US/EU residents or
-requiring on-site presence scores low on remote compatibility however good the rest is.
+tech, Web3 VCs, creative and marketing agencies, international startups.
+
+REMOTE ONLY. Flávio is based in Brazil and only considers fully remote roles he can do from Brazil. Set relevant=false
+(with the reason) when a role is on-site or hybrid, or when it is remote but explicitly limited to countries or regions
+that exclude Brazil (for example "US only", "EU residents", "must be based in the UK"). Keep roles that are remote
+worldwide, remote in the Americas / LATAM, or remote with no stated restriction, and say which it is. For companies with
+no public vacancy, keep them only if the company is known or stated to hire remotely.
 
 Also recognise unadvertised opportunities: e.g. a startup that just raised, is expanding its ecosystem and hiring
 marketers may need growth, partnerships or BD capacity even with no posted vacancy. Mark that reasoning as a hypothesis.

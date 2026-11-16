@@ -20,25 +20,34 @@ SOURCE_TYPES = {
     "ashby": {"label": "Ashby job board (one company)", "field": "board", "hint": "Board name, e.g. the 'acme' in jobs.ashbyhq.com/acme", "kind": "job_posting"},
 }
 
-FUNDING_WORDS = ["raises", "raised", "funding", "seed round", "series a", "series b", "launches", "launch of",
-                 "rebrand", "mainnet", "expands", "partnership", "partners with", "unveils"]
+FUNDING_WORDS = ["raises", "raised", "funding", "seed round", "pre-seed", "series a", "series b", "series c",
+                 "investment round", "closes round", "secures", "backed by", "led by", "million round", "valuation"]
 CAREER_WORDS = ["growth", "business development", "partnerships", "partnership", "account executive", "marketing",
                 "go-to-market", "gtm", "ecosystem", "community", "account manager", "bdr", "sales development",
                 "client partner"]
-DESIGN_HIRING_WORDS = ["designer", "brand", "creative director", "head of marketing", "marketing lead", "webflow"]
+# A remote job is kept only if its stated location is empty or contains one of these.
+BRAZIL_OK = ["worldwide", "anywhere", "global", "international", "latam", "latin america", "south america",
+             "americas", "brazil", "brasil", "remote", "all countries", "emea, americas"]
 
 DEFAULT_SOURCES = {
     "lit": [
-        {"type": "rss", "name": "Cointelegraph — funding & launch news", "config": {"url": "https://cointelegraph.com/rss", "keywords": FUNDING_WORDS}},
-        {"type": "rss", "name": "Decrypt — funding & launch news", "config": {"url": "https://decrypt.co/feed", "keywords": FUNDING_WORDS}},
-        {"type": "rss", "name": "TechCrunch Venture", "config": {"url": "https://techcrunch.com/category/venture/feed/", "keywords": FUNDING_WORDS}},
-        {"type": "remotive", "name": "Remotive — companies hiring design/marketing", "config": {"keywords": DESIGN_HIRING_WORDS}},
+        {"type": "rss", "name": "Cointelegraph — funding rounds", "config": {"url": "https://cointelegraph.com/rss", "keywords": FUNDING_WORDS}},
+        {"type": "rss", "name": "Decrypt — funding rounds", "config": {"url": "https://decrypt.co/feed", "keywords": FUNDING_WORDS}},
+        {"type": "rss", "name": "TechCrunch Venture — funding rounds", "config": {"url": "https://techcrunch.com/category/venture/feed/", "keywords": FUNDING_WORDS}},
+        {"type": "rss", "name": "CoinDesk — funding rounds", "config": {"url": "https://www.coindesk.com/arc/outboundfeeds/rss/", "keywords": FUNDING_WORDS}},
+        {"type": "rss", "name": "The Block — funding rounds", "config": {"url": "https://www.theblock.co/rss.xml", "keywords": FUNDING_WORDS}},
     ],
     "career": [
-        {"type": "remotive", "name": "Remotive — growth, BD, marketing roles", "config": {"keywords": CAREER_WORDS}},
-        {"type": "remoteok", "name": "Remote OK — growth, BD, marketing roles", "config": {"keywords": CAREER_WORDS}},
+        {"type": "remotive", "name": "Remotive — remote growth, BD, marketing roles", "config": {"keywords": CAREER_WORDS, "brazil_ok": True}},
+        {"type": "remoteok", "name": "Remote OK — remote growth, BD, marketing roles", "config": {"keywords": CAREER_WORDS, "brazil_ok": True}},
     ],
 }
+
+
+def location_ok(cfg, location):
+    """With brazil_ok set, drop remote jobs whose stated location excludes Brazil (e.g. 'USA Only')."""
+    loc = (location or "").strip().lower()
+    return not cfg.get("brazil_ok") or not loc or any(k in loc for k in BRAZIL_OK)
 
 
 def clean(text, limit=6000):
@@ -102,7 +111,7 @@ def fetch_remotive(cfg):
         url += "?search=" + urllib.parse.quote(cfg["search"])
     out = []
     for j in json.loads(http_get(url)).get("jobs", []):
-        if _matches(j.get("title", ""), cfg.get("keywords")):
+        if _matches(j.get("title", ""), cfg.get("keywords")) and location_ok(cfg, j.get("candidate_required_location")):
             extra = f"Location requirement: {j.get('candidate_required_location', 'n/a')}. Salary: {j.get('salary') or 'not stated'}. Type: {j.get('job_type', '')}. Posted: {j.get('publication_date', '')}."
             out.append(_job(j.get("title", ""), j.get("company_name", ""), j.get("url", ""), j.get("description", ""), "remotive-%s" % j.get("id"), extra))
     return out
@@ -113,7 +122,7 @@ def fetch_remoteok(cfg):
     for j in json.loads(http_get("https://remoteok.com/api")):
         if not isinstance(j, dict) or not j.get("position"):
             continue
-        if _matches(j["position"], cfg.get("keywords")):
+        if _matches(j["position"], cfg.get("keywords")) and location_ok(cfg, j.get("location")):
             sal = f"{j.get('salary_min')}-{j.get('salary_max')} USD" if j.get("salary_max") else "not stated"
             extra = f"Location: {j.get('location') or 'n/a'}. Salary: {sal}. Tags: {', '.join(j.get('tags') or [])}. Posted: {j.get('date', '')}."
             out.append(_job(j["position"], j.get("company", ""), j.get("url") or j.get("apply_url", ""), j.get("description", ""), "remoteok-%s" % j.get("id"), extra))

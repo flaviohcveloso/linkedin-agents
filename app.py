@@ -95,6 +95,29 @@ def seed_sources():
             d.run("INSERT INTO meta(key,value) VALUES('seeded','1')")
 
 
+def migrate():
+    """One-time changes to data that already exists in a deployed database."""
+    lit, car = db.agent_db(AGENTS["lit"]), db.agent_db(AGENTS["career"])
+    if not lit.val("SELECT value FROM meta WHERE key='focus_funding'"):
+        # Lit: stop using job boards as a lead source; RSS feeds filter on funding words only.
+        have = set()
+        for src in lit.all("SELECT * FROM sources"):
+            have.add((src["config"] or {}).get("url"))
+            if src["type"] != "rss":
+                lit.update("sources", src["id"], {"enabled": 0})
+                lit.run("UPDATE signals SET status='irrelevant', error='Job-board source switched off: Lit now focuses on funded companies' WHERE source_id=? AND status IN('new','error')", (src["id"],))
+            elif set((src["config"] or {}).get("keywords") or []) & {"launches", "partnership", "mainnet"}:
+                lit.update("sources", src["id"], {"config": dict(src["config"], keywords=sources.FUNDING_WORDS)})
+        for d in sources.DEFAULT_SOURCES["lit"]:
+            if d["config"]["url"] not in have:
+                lit.insert("sources", dict(d, enabled=1))
+        lit.run("INSERT INTO meta(key,value) VALUES('focus_funding','1')")
+    if not car.val("SELECT value FROM meta WHERE key='remote_only'"):
+        for src in car.all("SELECT * FROM sources WHERE type IN('remotive','remoteok')"):
+            car.update("sources", src["id"], {"config": dict(src["config"] or {}, brazil_ok=True)})
+        car.run("INSERT INTO meta(key,value) VALUES('remote_only','1')")
+
+
 def status():
     sysdb = db.system_db()
     return {"claude": claude.configured(), "model": db.get_setting("model"),
@@ -401,6 +424,7 @@ def main():
         sys.exit("DATABASE_URL is set but is not a Postgres connection string. It must start with postgresql://")
     try:
         seed_sources()
+        migrate()
     except Exception as e:
         if db.DATABASE_URL:
             sys.exit(f"Could not connect to the database with DATABASE_URL: {type(e).__name__}: {str(e)[:300]}")

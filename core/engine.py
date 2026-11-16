@@ -238,6 +238,8 @@ Call record_analysis."""
         raise
     r = normalize_analysis(r)
     log(d, s["opportunity_id"], "analysis", {"signal": signal_id, "web_search": searched})
+    if agent["key"] == "career" and r.get("relevant") and r["role"].get("remote") == "Hybrid or on-site":
+        r["relevant"], r["irrelevance_reason"] = False, "Not a remote role (hybrid or on-site)."
     if not r.get("relevant"):
         d.update("signals", signal_id, {"status": "irrelevant", "error": r.get("irrelevance_reason") or "Not relevant"})
         return {"relevant": False, "reason": r.get("irrelevance_reason")}
