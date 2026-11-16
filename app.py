@@ -405,9 +405,9 @@ def main():
         if db.DATABASE_URL:
             sys.exit(f"Could not connect to the database with DATABASE_URL: {type(e).__name__}: {str(e)[:300]}")
         raise
-    # Signals left mid-analysis by a previous shutdown go back to the queue.
+    # Signals left mid-analysis or failed before this start go back to the queue.
     for a in AGENTS.values():
-        db.agent_db(a).run("UPDATE signals SET status='new' WHERE status='analyzing'")
+        db.agent_db(a).run("UPDATE signals SET status='new', error=NULL WHERE status IN('analyzing','error')")
     threading.Thread(target=scheduler, daemon=True).start()
     cloud = bool(os.environ.get("RENDER") or db.DATABASE_URL or os.environ.get("HOST"))
     if cloud and len(PASSWORD) < 10:
