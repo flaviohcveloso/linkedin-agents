@@ -1,0 +1,23 @@
+# Render Blueprint: one free web service. Database is Neon Postgres (free), set through DATABASE_URL.
+services:
+  - type: web
+    name: linkedin-agents
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: ANTHROPIC_API_KEY   # from console.anthropic.com
+        sync: false
+      - key: DATABASE_URL        # Neon connection string
+        sync: false
+      - key: APP_PASSWORD        # your sign-in password, 10+ characters
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: CRON_TOKEN          # copy this value into the GitHub secret CRON_TOKEN
+        generateValue: true
