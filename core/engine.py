@@ -335,7 +335,7 @@ Call record_draft."""
         "suggested_message": {"type": "string"}, "alternative_message": {"type": "string"},
         "recommended_follow_up": {"type": "string"}},
         "required": ["signal_reference", "why_this_makes_sense", "angle", "suggested_message", "alternative_message", "recommended_follow_up"]}}
-    r, _ = claude.call_tool(system_prompt(agent), user, tool, max_tokens=1500)
+    r, _ = claude.call_tool(system_prompt(agent), user, tool, max_tokens=4000)
     text = (r.get("suggested_message") or "").strip()
     mid = d.insert("messages", {"opportunity_id": opp_id, "contact_id": contact_id, "created_at": db.now(), "type": mtype,
                                 "signal_ref": r.get("signal_reference", ""), "rationale": r.get("why_this_makes_sense", ""),
