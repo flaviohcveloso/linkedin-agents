@@ -408,6 +408,8 @@ def main():
     # Signals left mid-analysis or failed before this start go back to the queue.
     for a in AGENTS.values():
         db.agent_db(a).run("UPDATE signals SET status='new', error=NULL WHERE status IN('analyzing','error')")
+    for a in AGENTS.values():
+        engine.repair_stored_companies(a)
     threading.Thread(target=scheduler, daemon=True).start()
     cloud = bool(os.environ.get("RENDER") or db.DATABASE_URL or os.environ.get("HOST"))
     if cloud and len(PASSWORD) < 10:

@@ -95,14 +95,37 @@ def learning_context(agent):
 
 # ---------------------------------------------------------------- analysis
 
+PARAM_RE = re.compile(r'<parameter name="(\w+)">(.*?)(?=</parameter>|<parameter |$)', re.S)
+TAG_RE = re.compile(r"</?(?:parameter|antml:parameter|invoke|antml:invoke)[^>]*>")
+
+
+def repair_stored_companies(agent):
+    """One-off clean-up for records saved before the markup fix."""
+    d = db.agent_db(agent)
+    for o in d.all("SELECT id, company FROM opportunities"):
+        if "<parameter" in (o["company"] or ""):
+            c = _obj(o["company"], "name")
+            upd = {"company": c.get("name") or TAG_RE.sub("", o["company"]).strip()}
+            for src, col in (("website", "company_url"), ("industry", "industry"), ("stage", "company_stage")):
+                if c.get(src):
+                    upd[col] = c[src]
+            d.update("opportunities", o["id"], upd)
+
+
 def _obj(v, text_key):
     """Claude sometimes returns a nested object as a JSON string or as plain text. Always give back a dict."""
     if isinstance(v, str):
+        pairs = PARAM_RE.findall(v)
+        if pairs:  # markup such as <parameter name="name">Acme</parameter><parameter name="industry">DeFi</parameter>
+            return {k: TAG_RE.sub("", val).strip() for k, val in pairs}
         try:
             v = json.loads(v)
         except ValueError:
-            return {text_key: v.strip()} if v.strip() else {}
-    return v if isinstance(v, dict) else {}
+            v = TAG_RE.sub("", v).strip()
+            return {text_key: v} if v else {}
+    if not isinstance(v, dict):
+        return {}
+    return {k: (TAG_RE.sub("", x).strip() if isinstance(x, str) else x) for k, x in v.items()}
 
 
 def _list(v, text_key):
