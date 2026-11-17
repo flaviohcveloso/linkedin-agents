@@ -27,12 +27,16 @@ LinkedIn gives individual developers no API for reading other members' profiles 
 | Job openings and funding / launch news | Fetched on a schedule from public job-board APIs and RSS feeds (labelled *Retrieved data*) |
 | Company background | Optional Claude web search over public pages (labelled *Public information*; off by default, billed per search by Anthropic) |
 | Anything Claude infers | Labelled *AI hypothesis*; drafts are told not to state hypotheses as fact |
-| Finding the right person | Claude names the role; the "Search on LinkedIn" link opens a normal LinkedIn search for you to run; you add the contact |
+| Finding the right person and their LinkedIn URL | Claude names the person or role; profile URLs are found with Anthropic's web search on the public web. A URL is kept only if it appears in the search results under that person's name (or in the source text, or you paste it). Otherwise the lead is flagged "LinkedIn URL missing"; nothing is guessed |
 | Sending | Approve → Copy → send on LinkedIn → "mark as sent" |
 | Replies | You log them (positive / neutral / negative) |
 | Your connections | Import `Connections.csv` from LinkedIn's own data export; known contacts are flagged |
 
 If LinkedIn ever grants you partner API access, the send step is a single function to add in `core/engine.py` (`message_action`, the `sent` branch).
+
+## Every lead stays visible
+
+**All leads** lists everything both agents found: qualified, unqualified, rejected by the AI (with its score and reason), dismissed by you, and signals still waiting for analysis. Nothing is deleted. Filter by status, agent, LinkedIn URL present or missing, or search. Pursue, dismiss or restore leads one by one or in bulk.
 
 ## Keeping the two agents apart
 

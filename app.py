@@ -2,6 +2,8 @@
 """LinkedIn Agents — web server.
 Cloud: set APP_PASSWORD, DATABASE_URL, ANTHROPIC_API_KEY (see DEPLOY.md); the app requires login.
 Local: python app.py, then open http://127.0.0.1:8765 (no login, localhost only)."""
+import collections
+import gzip
 import hashlib
 import hmac
 import json
@@ -39,7 +41,9 @@ PORT = int(os.environ.get("PORT", "8765"))
 PASSWORD = os.environ.get("APP_PASSWORD") or ""
 CRON_TOKEN = os.environ.get("CRON_TOKEN") or ""
 SESSION_DAYS = 30
-STATE = {"next_run": None, "running": set(), "fails": {}}
+STATE = {"next_run": None, "running": set(), "fails": {}, "perf": collections.deque(maxlen=400),
+         "job": {"total": 0, "done": 0, "found": 0, "errors": [], "running": False}}
+MAX_ATTEMPTS = 3
 
 
 def session_secret():
@@ -75,7 +79,7 @@ def login_failed(ip):
 
 LINKEDIN_ACCESS = [
     {"capability": "Read other people's profiles, posts or activity", "status": "unavailable", "detail": "No open API. Partner programs only; the Sales Navigator API (SNAP) is not accepting new partners.", "workflow": "You view the profile or post on LinkedIn and paste the text into Capture."},
-    {"capability": "Search people or companies", "status": "unavailable", "detail": "No open endpoint for people search.", "workflow": "Claude names the role to look for; you search on LinkedIn and add the contact."},
+    {"capability": "Search people or companies", "status": "unavailable", "detail": "No open endpoint for people search.", "workflow": "Claude names the person or role; LinkedIn profile URLs are found with Anthropic's web search on the public web, and only links that appear in the search results are kept. You can also paste the link yourself."},
     {"capability": "Send connection requests or messages", "status": "unavailable", "detail": "Messages and Invitations APIs are restricted to approved partners and bar automated sending. Bots and browser automation breach the User Agreement.", "workflow": "Approve here, then Copy and send it yourself on LinkedIn; mark it as sent."},
     {"capability": "Read your inbox / replies", "status": "unavailable", "detail": "Not exposed to individual developers.", "workflow": "Log the reply on the message card (positive / neutral / negative)."},
     {"capability": "Profile visitors, private engagement data", "status": "unavailable", "detail": "Not available through any API.", "workflow": "Not collected."},
@@ -129,6 +133,19 @@ def migrate():
                 car.insert("sources", dict(d, enabled=1))
         car.run("DELETE FROM meta WHERE key='criteria'")  # weights saved for the old rubric no longer apply
         car.run("INSERT INTO meta(key,value) VALUES('tracks_v2','1')")
+    for a in AGENTS.values():
+        d = db.agent_db(a)
+        if not d.val("SELECT value FROM meta WHERE key='leads_v1'"):
+            # Lead visibility release: label existing LinkedIn links by where they came from, mark leads that
+            # already have outreach as pursued, and separate signals Flávio dismissed from AI rejections.
+            d.run("UPDATE contacts SET url_status='user_provided', url_evidence='Added by you' WHERE linkedin_url!='' AND linkedin_url IS NOT NULL AND basis='user_provided'")
+            d.run("UPDATE contacts SET url_status='unverified', url_evidence='Suggested by the AI before link checking existed; not verified.' WHERE linkedin_url!='' AND linkedin_url IS NOT NULL AND basis!='user_provided'")
+            d.run("UPDATE contacts SET url_status='missing' WHERE linkedin_url='' OR linkedin_url IS NULL")
+            d.run("UPDATE opportunities SET decision='pursue' WHERE id IN (SELECT opportunity_id FROM messages)")
+            d.run("UPDATE opportunities SET ai_verdict='relevant' WHERE ai_verdict IS NULL")
+            d.run("UPDATE opportunities SET decision='new' WHERE decision IS NULL")
+            d.run("UPDATE signals SET status='dismissed' WHERE status='irrelevant' AND (error='Dismissed by Flávio' OR error LIKE 'Job-board source switched off%')")
+            d.run("INSERT INTO meta(key,value) VALUES('leads_v1','1')")
 
 
 def status():
@@ -138,7 +155,50 @@ def status():
             "next_run": STATE["next_run"], "running": sorted(STATE["running"]),
             "last_runs": sysdb.all("SELECT * FROM runs ORDER BY id DESC LIMIT 8"),
             "connections": sysdb.val("SELECT COUNT(*) FROM network"),
-            "linkedin_send": "manual", "database": db.backend(), "login": bool(PASSWORD), "cron": bool(CRON_TOKEN)}
+            "linkedin_send": "manual", "database": db.backend(), "login": bool(PASSWORD), "cron": bool(CRON_TOKEN),
+            "inbox": sum(engine.overview(a)["metrics"]["to_review"] + engine.overview(a)["metrics"]["to_send"] for a in AGENTS.values()),
+            "job": {k: v for k, v in STATE["job"].items() if k != "errors"} | {"errors": STATE["job"]["errors"][-3:]}}
+
+
+def diagnostics():
+    """Measured, not estimated: database round-trip time now, and timings of recent requests."""
+    pings = []
+    for _ in range(3):
+        db.reset_stats()
+        t = time.perf_counter()
+        db.system_db().val("SELECT 1")
+        pings.append(round((time.perf_counter() - t) * 1000, 1))
+    agg = {}
+    for label, ms, q, dbms in list(STATE["perf"]):
+        a = agg.setdefault(label, {"route": label, "n": 0, "ms": 0.0, "queries": 0, "db_ms": 0.0})
+        a["n"] += 1; a["ms"] += ms; a["queries"] += q; a["db_ms"] += dbms
+    rows = [{"route": a["route"], "requests": a["n"], "avg_ms": round(a["ms"] / a["n"]), "avg_queries": round(a["queries"] / a["n"], 1),
+             "avg_db_ms": round(a["db_ms"] / a["n"])} for a in agg.values()]
+    return {"db_ping_ms": pings, "database": db.backend(), "requests": sorted(rows, key=lambda r: -r["avg_ms"])[:15],
+            "leads": {k: len(engine.lead_rows(a)) for k, a in AGENTS.items()}}
+
+
+def bulk_lookup(items):
+    """Background LinkedIn profile lookups for many leads, one after another."""
+    job = STATE["job"]
+    if job["running"]:
+        raise HttpError(409, "A lookup batch is already running.")
+    job.update({"total": len(items), "done": 0, "found": 0, "errors": [], "running": True})
+
+    def work():
+        try:
+            for it in items:
+                try:
+                    r = engine.find_profiles(AGENTS[it["agent"]], int(it["opp_id"]))
+                    job["found"] += r["found"]
+                except Exception as e:
+                    job["errors"].append(f"{it['agent']} lead {it['opp_id']}: {e}"[:300])
+                    if isinstance(e, claude.ClaudeError) and "Web search" in str(e):
+                        break
+                job["done"] += 1
+        finally:
+            job["running"] = False
+    threading.Thread(target=work, daemon=True).start()
 
 
 def start_run(agent, trigger, only_source=None):
@@ -181,6 +241,30 @@ def scheduler():
         time.sleep(30)
 
 
+_assets = {}
+
+
+def static_asset(path):
+    """Static files, read and gzipped once. app.js and styles.css are referenced with a content hash so the
+    browser can keep them for a year; index.html is always revalidated."""
+    if not _assets:
+        ver = hashlib.sha1(b"".join(open(os.path.join(PUBLIC, f), "rb").read() for f in ("app.js", "styles.css"))).hexdigest()[:10]
+        for name in os.listdir(PUBLIC):
+            full = os.path.join(PUBLIC, name)
+            if not os.path.isfile(full):
+                continue
+            body = open(full, "rb").read()
+            if name == "index.html":
+                body = body.replace(b'src="app.js"', f'src="app.js?v={ver}"'.encode()).replace(b'href="styles.css"', f'href="styles.css?v={ver}"'.encode())
+            ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+            if name.endswith(".js"):
+                ctype = "application/javascript"
+            cache = "no-cache" if name == "index.html" else "public, max-age=31536000, immutable"
+            _assets["/" + name] = (body, gzip.compress(body, 9), ctype, cache)
+        _assets["/"] = _assets["/index.html"]
+    return _assets.get(path)
+
+
 class HttpError(Exception):
     def __init__(self, code, msg):
         self.code, self.msg = code, msg
@@ -198,6 +282,12 @@ def opp_detail(agent, oid):
     return o
 
 
+MSG_SQL = """SELECT m.*, o.company, o.score, o.classification, o.conflict, o.conflict_ack, o.headline,
+                    c.name contact_name, c.title contact_title, c.linkedin_url, c.url_status, c.connected
+             FROM messages m JOIN opportunities o ON o.id=m.opportunity_id LEFT JOIN contacts c ON c.id=m.contact_id
+             ORDER BY m.id DESC LIMIT 300"""
+
+
 def route(method, path, q, body):
     seg = [s for s in path.split("/") if s][1:]  # drop 'api'
     if seg == ["config"]:
@@ -207,6 +297,35 @@ def route(method, path, q, body):
         return status()
     if seg == ["overview"]:
         return {k: engine.overview(a) for k, a in AGENTS.items()}
+    if seg == ["diagnostics"]:
+        return diagnostics()
+    if seg == ["leads"] and method == "GET":
+        ag = q.get("agent", ["all"])[0]
+        keys = list(AGENTS) if ag == "all" else [ag] if ag in AGENTS else []
+        g = lambda k, dflt="": q.get(k, [dflt])[0]
+        return engine.query_leads(keys, g("category", "all"), g("q"), g("linkedin"), g("sort", "newest"), g("page", "1"), g("size", "50"))
+    if seg == ["leads", "bulk"] and method == "POST":
+        items = [i for i in (body.get("items") or []) if i.get("agent") in AGENTS][:500]
+        act = body.get("action")
+        if act == "find_profiles":
+            bulk_lookup([i for i in items if i.get("opp_id")])
+            return {"started": True, "count": len([i for i in items if i.get("opp_id")])}
+        n = 0
+        for i in items:
+            a, d = AGENTS[i["agent"]], db.agent_db(AGENTS[i["agent"]])
+            if i.get("opp_id") and act in ("pursue", "dismissed", "new"):
+                engine.decide(a, int(i["opp_id"]), act); n += 1
+            elif i.get("signal_id") and not i.get("opp_id") and act in ("dismissed", "new"):
+                d.run("UPDATE signals SET status=?, error=? WHERE id=? AND opportunity_id IS NULL",
+                      ("dismissed", "Dismissed by Flávio", int(i["signal_id"])) if act == "dismissed" else ("new", None, int(i["signal_id"]))); n += 1
+        return {"updated": n}
+    if seg == ["messages"] and method == "GET":
+        ag = q.get("agent", ["all"])[0]
+        out = []
+        for k, a in AGENTS.items():
+            if ag in ("all", k):
+                out += [dict(m, agent=k) for m in engine._cached(a, "messages", lambda a=a: db.agent_db(a).all(MSG_SQL))]
+        return sorted(out, key=lambda m: m["created_at"] or "", reverse=True)
     if seg == ["settings"] and method == "POST":
         for k, v in body.items():
             if k in db.DEFAULT_SETTINGS:
@@ -225,17 +344,25 @@ def route(method, path, q, body):
     d = db.agent_db(agent)
     ident = int(rest[1]) if len(rest) > 1 and rest[1].isdigit() else None
 
+    if rest == ["board"]:
+        return engine.board(agent)
+
     if rest == ["run"] and method == "POST":
         start_run(agent, "manual", body.get("source"))
         return {"started": True}
 
     if rest[:1] == ["signals"]:
         if method == "GET":
+            if ident:
+                sg = d.one("SELECT * FROM signals WHERE id=?", (ident,))
+                if not sg:
+                    raise HttpError(404, "Not found")
+                return sg
             st = q.get("status", ["open"])[0]
-            where = "status IN('new','analyzing','error')" if st == "open" else "status='irrelevant'" if st == "irrelevant" else "1=1"
+            where = "status IN('new','analyzing','error')" if st == "open" else "status IN('irrelevant','dismissed')" if st == "irrelevant" else "1=1"
             return d.all(f"SELECT * FROM signals WHERE {where} ORDER BY id DESC LIMIT 200")
         if method == "POST" and rest[1:] == ["dismiss_all"]:
-            d.run("UPDATE signals SET status='irrelevant', error='Dismissed by Flávio' WHERE status IN('new','error')")
+            d.run("UPDATE signals SET status='dismissed', error='Dismissed by Flávio' WHERE status IN('new','error') AND opportunity_id IS NULL")
             return {"ok": True}
         if method == "POST" and ident is None:
             if not (body.get("body") or "").strip():
@@ -250,16 +377,20 @@ def route(method, path, q, body):
         if method == "POST" and rest[2:] == ["analyze"]:
             return engine.analyze(agent, ident, research=bool(body.get("research")) or db.get_setting("web_research") == "1")
         if method == "POST" and rest[2:] == ["dismiss"]:
-            d.update("signals", ident, {"status": "irrelevant", "error": "Dismissed by Flávio"})
+            d.update("signals", ident, {"status": "dismissed", "error": "Dismissed by Flávio"})
+            return {"ok": True}
+        if method == "POST" and rest[2:] == ["restore"]:
+            d.update("signals", ident, {"status": "new", "error": None, "attempts": 0})
             return {"ok": True}
 
     if rest[:1] == ["opportunities"]:
         if method == "GET" and ident is None:
-            rows = d.all("SELECT * FROM opportunities ORDER BY parked, score DESC, id DESC")
-            for o in rows:
-                o["contact"] = d.one("SELECT name,title,basis FROM contacts WHERE opportunity_id=? ORDER BY (name!='') DESC, id LIMIT 1", (o["id"],))
-                o["messages"] = d.val("SELECT COUNT(*) FROM messages WHERE opportunity_id=? AND status!='rejected'", (o["id"],))
-                o["link"] = d.val("SELECT url FROM signals WHERE id=?", (o["signal_id"],)) or ""
+            data = engine.lead_data(agent)
+            rows = []
+            for o in sorted(data["opps"], key=lambda o: (o["parked"], -(o["score"] or 0), -o["id"])):
+                cs = data["contacts"].get(o["id"], [])
+                c = next((c for c in cs if c["name"]), cs[0] if cs else None)
+                rows.append(dict(o, contact={k: c[k] for k in ("name", "title", "basis")} if c else None, messages=o["msgs"], link=o["source_url"]))
             return rows
         if method == "GET" and rest[2:] == ["ics"]:
             o = opp_detail(agent, ident)
@@ -276,6 +407,12 @@ def route(method, path, q, body):
         if method == "POST" and rest[2:] == ["draft"]:
             engine.draft(agent, ident, body.get("contact_id"), body.get("type"))
             return opp_detail(agent, ident)
+        if method == "POST" and rest[2:] == ["decision"]:
+            engine.decide(agent, ident, body.get("decision"))
+            return opp_detail(agent, ident)
+        if method == "POST" and rest[2:] == ["find_profiles"]:
+            r = engine.find_profiles(agent, ident, body.get("contact_id"))
+            return dict(opp_detail(agent, ident), lookup=r)
         if method == "POST" and rest[2:] == ["research"]:
             o = opp_detail(agent, ident)
             engine.analyze(agent, o["signal_id"], research=True)
@@ -283,10 +420,14 @@ def route(method, path, q, body):
         if method == "PATCH":
             if "stage" in body:
                 engine.set_stage(agent, ident, body["stage"])
+                d.run("UPDATE opportunities SET decision='pursue' WHERE id=? AND decision='new'", (ident,))
             upd = {k: body[k] for k in ("notes", "meeting_at", "parked", "conflict_ack") if k in body}
             if upd:
                 d.update("opportunities", ident, dict(upd, updated_at=db.now()))
             return opp_detail(agent, ident)
+
+    if rest[:1] == ["contacts"] and method == "PATCH":
+        return engine.update_contact(agent, ident, body)
 
     if rest[:1] == ["contacts"] and method == "DELETE":
         if d.val("SELECT 1 FROM messages WHERE contact_id=?", (ident,)):
@@ -296,10 +437,7 @@ def route(method, path, q, body):
 
     if rest[:1] == ["messages"]:
         if method == "GET":
-            return d.all("""SELECT m.*, o.company, o.score, o.classification, o.conflict, o.conflict_ack, o.headline,
-                            c.name contact_name, c.title contact_title, c.linkedin_url, c.connected
-                            FROM messages m JOIN opportunities o ON o.id=m.opportunity_id LEFT JOIN contacts c ON c.id=m.contact_id
-                            ORDER BY m.id DESC LIMIT 300""")
+            return engine._cached(agent, "messages", lambda: d.all(MSG_SQL))
         if method == "POST" and ident:
             return engine.message_action(agent, ident, body.get("action"), body)
 
@@ -335,12 +473,21 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def send(self, code, payload, ctype="application/json"):
-        data = payload if isinstance(payload, bytes) else (payload if ctype != "application/json" else json.dumps(payload)).encode("utf-8")
+    def send(self, code, payload, ctype="application/json", cache="no-store", gz=None):
+        data = payload if isinstance(payload, bytes) else (payload if ctype != "application/json" else json.dumps(payload, separators=(",", ":"), default=str)).encode("utf-8")
+        zipped = "gzip" in (self.headers.get("Accept-Encoding") or "") and len(data) > 1200 and ctype.startswith(("text", "application/j"))
+        if zipped:
+            data = gz or gzip.compress(data, 5)
         self.send_response(code)
         self.send_header("Content-Type", ctype + ("; charset=utf-8" if ctype.startswith(("text", "application/j")) else ""))
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        if zipped:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
+        self.send_header("Cache-Control", cache)
+        if getattr(self, "t0", None):
+            q, dbms = db.stats()
+            self.send_header("Server-Timing", f"db;desc=\"{q} queries\";dur={dbms:.0f}, total;dur={(time.perf_counter() - self.t0) * 1000:.0f}")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -392,15 +539,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_any(self):
         self.extra_headers = []
+        self.t0 = time.perf_counter()
+        db.reset_stats()
         u = urlparse(self.path)
         if not u.path.startswith("/api/") and u.path != "/healthz":
             if self.command != "GET":
                 return self.send(405, {"error": "Method not allowed"})
-            rel = "index.html" if u.path == "/" else u.path.lstrip("/")
-            full = os.path.realpath(os.path.join(PUBLIC, rel))
-            if not full.startswith(os.path.realpath(PUBLIC) + os.sep) or not os.path.isfile(full):
+            asset = static_asset(u.path)
+            if not asset:
                 return self.send(404, b"Not found", "text/plain")
-            return self.send(200, open(full, "rb").read(), mimetypes.guess_type(full)[0] or "application/octet-stream")
+            body, gz, ctype, cache = asset
+            return self.send(200, body, ctype, cache=cache, gz=gz)
         try:
             # Refuse state-changing requests that come from another site.
             origin = self.headers.get("Origin")
@@ -420,6 +569,8 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(out, tuple):
                 return self.send(200, out[1], out[0])
             self.send(200, out)
+            q, dbms = db.stats()
+            STATE["perf"].append((self.command + " " + re.sub(r"/\d+", "/:id", u.path), (time.perf_counter() - self.t0) * 1000, q, dbms))
         except HttpError as e:
             self.send(e.code, {"error": e.msg})
         except PermissionError as e:
@@ -445,7 +596,7 @@ def main():
         raise
     # Signals left mid-analysis or failed before this start go back to the queue.
     for a in AGENTS.values():
-        db.agent_db(a).run("UPDATE signals SET status='new', error=NULL WHERE status IN('analyzing','error')")
+        db.agent_db(a).run("UPDATE signals SET status='new', error=NULL WHERE status='analyzing' OR (status='error' AND COALESCE(attempts,0)<?)", (MAX_ATTEMPTS,))
     for a in AGENTS.values():
         engine.repair_stored_companies(a)
     threading.Thread(target=scheduler, daemon=True).start()

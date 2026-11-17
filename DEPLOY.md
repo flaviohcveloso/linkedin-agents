@@ -32,7 +32,10 @@ The free Render instance sleeps after 15 minutes without traffic, so an outside 
 
 The workflow pings every 3 hours; the app itself decides whether a run is due (interval set in Settings, 6 hours by default).
 
-## 5. First-run checks in the app
+## 5. Enable web search (for LinkedIn profile lookup)
+In the Claude Console, an organization admin must turn on web search for the organization. Without it, "Find profile" shows an error and leads keep the "LinkedIn URL missing" flag. Web search costs $10 per 1,000 searches plus tokens; each lookup uses up to 3. Automatic lookups are capped per day in Settings → LinkedIn profile lookup.
+
+## 6. First-run checks in the app
 - **Settings → Claude API** shows "API key set". If your account uses a different model name, change it there.
 - **Settings → data sources**: press **Fetch** on each source. Any feed that fails shows its error; fix the URL or delete it.
 - Capture one LinkedIn post on an agent page and analyze it to confirm Claude responds.

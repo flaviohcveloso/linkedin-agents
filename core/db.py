@@ -1,10 +1,15 @@
 """Storage. One database per agent (lit, career) so their data can never be joined, plus `system` for
-things that belong to the platform itself (settings, run log, imported connections)."""
+things that belong to the platform itself (settings, run log, imported connections).
+
+Locally each is its own SQLite file. In the cloud (DATABASE_URL set) each is its own Postgres schema on
+one shared connection; every table reference is rewritten to its schema, so the agents never read each
+other's tables. Every write bumps `DB.version`, which the engine uses to cache read-heavy views."""
 import json
 import os
 import re
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 
 DATA_DIR = os.environ.get("LIA_DATA_DIR") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
@@ -13,16 +18,18 @@ AGENT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals(
   id INTEGER PRIMARY KEY, created_at TEXT, source_id INTEGER, source_name TEXT, kind TEXT,
   provenance TEXT, url TEXT, title TEXT, company TEXT, author TEXT, author_title TEXT, body TEXT,
-  dedupe TEXT UNIQUE, status TEXT DEFAULT 'new', error TEXT, opportunity_id INTEGER);
+  dedupe TEXT UNIQUE, status TEXT DEFAULT 'new', error TEXT, opportunity_id INTEGER, attempts INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS opportunities(
   id INTEGER PRIMARY KEY, created_at TEXT, updated_at TEXT, signal_id INTEGER,
   company TEXT, company_url TEXT, industry TEXT, company_stage TEXT, headline TEXT, summary TEXT,
   score INTEGER, classification TEXT, breakdown TEXT, detected TEXT, facts TEXT, services TEXT, role TEXT,
   next_step TEXT, stage TEXT, stage_changed_at TEXT, parked INTEGER DEFAULT 0, notes TEXT,
-  meeting_at TEXT, conflict TEXT, conflict_ack INTEGER DEFAULT 0, researched INTEGER DEFAULT 0);
+  meeting_at TEXT, conflict TEXT, conflict_ack INTEGER DEFAULT 0, researched INTEGER DEFAULT 0,
+  ai_verdict TEXT DEFAULT 'relevant', rejection_reason TEXT, decision TEXT DEFAULT 'new', decided_at TEXT);
 CREATE TABLE IF NOT EXISTS contacts(
   id INTEGER PRIMARY KEY, opportunity_id INTEGER, name TEXT, title TEXT, linkedin_url TEXT,
-  basis TEXT, why TEXT, connected INTEGER DEFAULT 0);
+  basis TEXT, why TEXT, connected INTEGER DEFAULT 0,
+  location TEXT, url_status TEXT DEFAULT 'missing', url_evidence TEXT, url_checked_at TEXT);
 CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY, opportunity_id INTEGER, contact_id INTEGER, created_at TEXT, type TEXT,
   signal_ref TEXT, rationale TEXT, angle TEXT, suggested TEXT, alternative TEXT, follow_up TEXT, final_text TEXT,
@@ -34,7 +41,21 @@ CREATE TABLE IF NOT EXISTS sources(
   id INTEGER PRIMARY KEY, type TEXT, name TEXT, config TEXT, enabled INTEGER DEFAULT 1,
   last_run_at TEXT, last_status TEXT, last_new INTEGER);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE INDEX IF NOT EXISTS idx_contacts_opp ON contacts(opportunity_id);
+CREATE INDEX IF NOT EXISTS idx_messages_opp ON messages(opportunity_id);
+CREATE INDEX IF NOT EXISTS idx_events_opp ON events(opportunity_id);
+CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status);
+CREATE INDEX IF NOT EXISTS idx_signals_opp ON signals(opportunity_id)
 """
+
+# Columns added after the first release. Existing databases get them through ALTER TABLE on start.
+ADDED_COLUMNS = {
+    "signals": [("attempts", "INTEGER DEFAULT 0")],
+    "opportunities": [("ai_verdict", "TEXT DEFAULT 'relevant'"), ("rejection_reason", "TEXT"),
+                      ("decision", "TEXT DEFAULT 'new'"), ("decided_at", "TEXT")],
+    "contacts": [("location", "TEXT"), ("url_status", "TEXT DEFAULT 'missing'"), ("url_evidence", "TEXT"),
+                 ("url_checked_at", "TEXT")],
+}
 
 SYSTEM_SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
@@ -43,10 +64,12 @@ CREATE TABLE IF NOT EXISTS runs(
   fetched INTEGER DEFAULT 0, new_signals INTEGER DEFAULT 0, analyzed INTEGER DEFAULT 0, errors TEXT);
 CREATE TABLE IF NOT EXISTS network(
   id INTEGER PRIMARY KEY, first_name TEXT, last_name TEXT, company TEXT, position TEXT,
-  url TEXT UNIQUE, connected_on TEXT);
+  url TEXT UNIQUE, connected_on TEXT)
 """
 
 JSON_COLS = {"breakdown", "detected", "facts", "services", "role", "config", "lint", "data"}
+
+
 def _clean_url(raw):
     """Neon's Connect dialog shows `psql 'postgresql://...'`; accept that paste as well as the bare URL."""
     raw = (raw or "").strip()
@@ -56,6 +79,18 @@ def _clean_url(raw):
 
 DATABASE_URL = _clean_url(os.environ.get("DATABASE_URL"))
 TABLES = "signals|opportunities|contacts|messages|events|sources|meta|settings|runs|network"
+_TABLE_RE = re.compile(r"\b(FROM|JOIN|INTO|UPDATE|TABLE IF NOT EXISTS|ALTER TABLE|ON)\s+(%s)\b" % TABLES)
+
+# Per-request diagnostics: how many round trips and how long they took (read by app.py).
+_tl = threading.local()
+
+
+def reset_stats():
+    _tl.q, _tl.ms = 0, 0.0
+
+
+def stats():
+    return getattr(_tl, "q", 0), getattr(_tl, "ms", 0.0)
 
 
 def now():
@@ -66,55 +101,92 @@ def backend():
     return "postgres" if DATABASE_URL else "sqlite"
 
 
-class DB:
-    """One logical database. Locally: its own SQLite file. In the cloud (DATABASE_URL set): its own
-    Postgres schema, with every table reference qualified so the two agents can never read each other."""
+class _PG:
+    """The single Postgres connection shared by all schemas, and the lock that serialises its use."""
+    conn = None
+    lock = threading.RLock()
 
+    @classmethod
+    def connect(cls):
+        import psycopg
+        from psycopg.rows import dict_row
+        if cls.conn is not None:
+            try:
+                cls.conn.close()
+            except Exception:
+                pass
+        cls.conn = psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=20,
+                                   keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3)
+
+
+class DB:
     def __init__(self, name, schema):
         self.name = name
-        self.lock = threading.RLock()
+        self.version = 0
         self.pg = bool(DATABASE_URL)
         if self.pg:
-            self._connect()
-            self.conn.execute(f"CREATE SCHEMA IF NOT EXISTS {name}")
-            for stmt in schema.split(";"):
-                if stmt.strip():
-                    self.conn.execute(self._sql(stmt.replace("INTEGER PRIMARY KEY", "BIGSERIAL PRIMARY KEY")))
+            self.lock = _PG.lock
+            with self.lock:
+                if _PG.conn is None:
+                    _PG.connect()
+                _PG.conn.execute(f"CREATE SCHEMA IF NOT EXISTS {name}")
+                for stmt in schema.split(";"):
+                    if stmt.strip():
+                        _PG.conn.execute(self._sql(stmt.replace("INTEGER PRIMARY KEY", "BIGSERIAL PRIMARY KEY")))
         else:
+            self.lock = threading.RLock()
             os.makedirs(DATA_DIR, exist_ok=True)
             self.path = os.path.join(DATA_DIR, name + ".db")
             self.conn = sqlite3.connect(self.path, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
-            self.conn.executescript(schema)
+            # Create tables first, then add new columns, then indexes (an index may use a new column).
+            stmts = [s for s in schema.split(";") if s.strip()]
+            for s in stmts:
+                if "CREATE INDEX" not in s:
+                    self.conn.execute(s)
+        if schema is AGENT_SCHEMA:
+            self._add_columns()
+        if not self.pg:
+            for s in [s for s in schema.split(";") if "CREATE INDEX" in s]:
+                self.conn.execute(s)
             self.conn.commit()
 
-    def _connect(self):
-        import psycopg
-        from psycopg.rows import dict_row
-        self.conn = psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=20)
+    def _add_columns(self):
+        for table, cols in ADDED_COLUMNS.items():
+            if self.pg:
+                have = {r["column_name"] for r in _PG.conn.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema=%s AND table_name=%s", (self.name, table)).fetchall()}
+            else:
+                have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            for col, typ in cols:
+                if col not in have:
+                    if self.pg:
+                        _PG.conn.execute(self._sql(f"ALTER TABLE {table} ADD COLUMN {col} {typ}"))
+                    else:
+                        self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
     def _sql(self, sql):
-        sql = re.sub(r"\b(FROM|JOIN|INTO|UPDATE|TABLE IF NOT EXISTS)\s+(%s)\b" % TABLES,
-                     lambda m: f"{m.group(1)} {self.name}.{m.group(2)}", sql)
+        sql = _TABLE_RE.sub(lambda m: f"{m.group(1)} {self.name}.{m.group(2)}", sql)
         return sql.replace("?", "%s")
 
     def _exec(self, sql, args=()):
         """Returns a cursor. Postgres: reconnects once if the server dropped an idle connection."""
-        if not self.pg:
-            return self.conn.execute(sql, args)
-        import psycopg
-        q = self._sql(sql)
-        for attempt in (0, 1):
-            try:
-                return self.conn.execute(q, tuple(args) or None)
-            except (psycopg.OperationalError, psycopg.InterfaceError):
-                if attempt:
-                    raise
+        t = time.perf_counter()
+        try:
+            if not self.pg:
+                return self.conn.execute(sql, args)
+            import psycopg
+            q = self._sql(sql)
+            for attempt in (0, 1):
                 try:
-                    self.conn.close()
-                except Exception:
-                    pass
-                self._connect()
+                    return _PG.conn.execute(q, tuple(args) or None)
+                except (psycopg.OperationalError, psycopg.InterfaceError):
+                    if attempt:
+                        raise
+                    _PG.connect()
+        finally:
+            _tl.q = getattr(_tl, "q", 0) + 1
+            _tl.ms = getattr(_tl, "ms", 0.0) + (time.perf_counter() - t) * 1000
 
     @staticmethod
     def _row(r):
@@ -143,10 +215,12 @@ class DB:
             return (list(r.values())[0] if self.pg else r[0]) if r else None
 
     def run(self, sql, args=()):
+        """Writes. Bumps the version so cached views are rebuilt."""
         with self.lock:
             cur = self._exec(sql, args)
             if not self.pg:
                 self.conn.commit()
+            self.version += 1
             return cur
 
     def insert(self, table, row):
@@ -154,7 +228,9 @@ class DB:
         sql = f"INSERT INTO {table}({','.join(row)}) VALUES({','.join('?' * len(row))})"
         with self.lock:
             if self.pg:
-                return self._exec(sql + " RETURNING id", tuple(row.values())).fetchone()["id"]
+                rid = self._exec(sql + " RETURNING id", tuple(row.values())).fetchone()["id"]
+                self.version += 1
+                return rid
             return self.run(sql, tuple(row.values())).lastrowid
 
     def update(self, table, id_, row):
@@ -190,14 +266,32 @@ DEFAULT_SETTINGS = {
     "analyze_per_run": "10",
     "daily_analysis_cap": "40",
     "web_research": "0",
+    "profile_lookup": "1",
+    "profile_lookup_min_score": "50",
+    "profile_lookups_per_day": "10",
 }
+
+# Settings are read on almost every request (session check, model name); keep them in memory.
+_settings_cache = {}
+_settings_lock = threading.Lock()
+
+
+def _load_settings():
+    with _settings_lock:
+        if not _settings_cache:
+            _settings_cache.update({r["key"]: r["value"] for r in system_db().all("SELECT key, value FROM settings")})
+            _settings_cache["__loaded__"] = "1"
 
 
 def get_setting(key):
-    v = system_db().val("SELECT value FROM settings WHERE key=?", (key,))
+    _load_settings()
+    v = _settings_cache.get(key)
     return v if v is not None else DEFAULT_SETTINGS.get(key)
 
 
 def set_setting(key, value):
     system_db().run("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     (key, str(value)))
+    _load_settings()
+    with _settings_lock:
+        _settings_cache[key] = str(value)

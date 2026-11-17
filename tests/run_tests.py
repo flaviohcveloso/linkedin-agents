@@ -24,7 +24,24 @@ class Mock(BaseHTTPRequestHandler):
         p = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         assert self.headers["x-api-key"] == "test-key"
         CALLS.append(p)
-        tool = [t for t in p["tools"] if t.get("name") in ("record_analysis", "record_draft")][0]
+        tool = [t for t in p["tools"] if t.get("name") in ("record_analysis", "record_draft", "record_profiles")][0]
+        if tool["name"] == "record_profiles":
+            text = p["messages"][0]["content"]
+            assert any(t.get("type", "").startswith("web_search") for t in p["tools"]), "lookup must use web search"
+            if "Identify" in text:  # no named person yet: discover one
+                results = [{"type": "web_search_result", "url": "https://www.linkedin.com/in/maria-silva-42", "title": "Maria Silva – Head of Marketing – Gamma | LinkedIn"}]
+                people = [{"name": "Maria Silva", "title": "Head of Marketing", "location": "São Paulo", "linkedin_url": "https://www.linkedin.com/in/maria-silva-42"},
+                          {"name": "Invented Person", "title": "CEO", "linkedin_url": "https://www.linkedin.com/in/invented-person"}]
+            else:
+                results = [{"type": "web_search_result", "url": "https://www.linkedin.com/in/jane-doe-123/", "title": "Jane Doe - Founder - Acme Protocol | LinkedIn"},
+                           {"type": "web_search_result", "url": "https://www.linkedin.com/in/bob-smith", "title": "Bob Smith - CTO | LinkedIn"}]
+                people = [{"name": "Jane Doe", "title": "Founder", "location": "Lisbon", "linkedin_url": "https://www.linkedin.com/in/jane-doe-123"}]
+            content = [{"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "x"}},
+                       {"type": "web_search_tool_result", "tool_use_id": "s1", "content": results},
+                       {"type": "tool_use", "id": "t1", "name": "record_profiles", "input": {"people": people}}]
+            out = json.dumps({"content": content, "stop_reason": "tool_use"}).encode()
+            self.send_response(200); self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
+            return
         text = p["messages"][0]["content"]
         if tool["name"] == "record_analysis":
             crit = tool["input_schema"]["properties"]["scores"]["items"]["properties"]["criterion"]["enum"]
@@ -61,6 +78,7 @@ from core import db, engine
 from core.agents import AGENTS
 
 app.seed_sources()
+db.set_setting("profile_lookup", "0")  # tested on its own below, so background runs stay deterministic
 R = lambda m, p, b=None: app.route(m, p, {}, b or {})
 n = 0
 def ok(cond, label):
@@ -91,7 +109,7 @@ run = db.system_db().one("SELECT * FROM runs ORDER BY id DESC")
 ok(run["fetched"] == 2 and run["new_signals"] == 2 and run["analyzed"] == 2, "run: keyword filter kept 2 of 3 items, both analyzed")
 engine.run_monitor(lit, "manual")
 ok(db.system_db().one("SELECT * FROM runs ORDER BY id DESC")["new_signals"] == 0, "second run adds no duplicates")
-opps = R("GET", "/api/lit/opportunities")
+opps = [o for o in R("GET", "/api/lit/opportunities") if o["ai_verdict"] == "relevant"]
 ok(len(opps) == 1 and opps[0]["score"] == 100 and opps[0]["classification"] == "Hot lead", "scores clamped to rubric maxima, total 100 -> Hot lead")
 ok(len(R("GET", "/api/lit/signals?status=irrelevant".split("?")[0])) == 0 and db.agent_db(lit).val("SELECT COUNT(*) FROM signals WHERE status='irrelevant'") == 1, "irrelevant signal filtered out with reason")
 o = R("GET", f"/api/lit/opportunities/{opps[0]['id']}")
@@ -196,6 +214,91 @@ for _ in range(40):
 ok(db.system_db().val("SELECT COUNT(*) FROM runs WHERE trigger='schedule'") == 2 and http("POST", "/api/cron", headers={"Authorization": "Bearer cron-secret"})[1]["started"] is False, "scheduled run recorded for both agents; second ping does not double-run")
 for i in range(9): http("POST", "/api/login", {"password": "guess%d" % i})
 ok(http("POST", "/api/login", {"password": "correct-horse-battery"})[0] == 429, "login locks after repeated wrong passwords")
+
+# --- lead visibility
+lv = R("GET", "/api/leads")
+cats = {r["category"] for r in lv["rows"]}
+ok(lv["counts"]["all"] == len(lv["rows"]) and lv["counts"]["rejected"] >= 1 and "rejected" in cats, "every analyzed signal is a visible lead, AI-rejected ones included")
+rej = [r for r in lv["rows"] if r["category"] == "rejected" and r["agent"] == "lit"][0]
+ok(rej["why_lead"] == "No company to approach" and rej["score"] is not None and rej["opp_id"], "rejected lead keeps its score and the AI's reason")
+jane = [r for r in lv["rows"] if r["name"] == "Jane Doe" and r["agent"] == "lit" and r["company"] == "Acme Protocol"][0]
+ok(jane["linkedin_url"] == "" and jane["url_status"] == "missing" and "discarded" in jane["url_evidence"], "a LinkedIn URL the AI made up (not in source or search results) is discarded and flagged")
+ok({r["agent"] for r in lv["rows"]} == {"lit", "career"} and all(k in jane for k in ("name", "position", "company", "location", "score", "category", "why_person", "agent")), "rows carry name, position, company, location, score, status, reason and agent")
+nop = [r for r in lv["rows"] if r["url_status"] == "no_person"]
+ok(all(not r["linkedin_url"] for r in nop), "leads without a named person are flagged, never given a URL")
+r = R("POST", "/api/lit/signals", {"kind": "linkedin_post", "body": "Acme2 raised. Founder Jane Doe https://www.linkedin.com/in/janedoe/ says rebrand next", "company": "Zeta", "analyze": True})
+zj = [c for c in R("GET", f"/api/lit/opportunities/{r['result']['opportunity_id']}")["contacts"] if c["name"] == "Jane Doe"][0]
+ok(zj["linkedin_url"] == "https://www.linkedin.com/in/janedoe" and zj["url_status"] == "stated_in_source", "a URL written in the source text is kept and labelled as such")
+ok(raises(lambda: R("PATCH", f"/api/lit/contacts/{zj['id']}", {"linkedin_url": "https://example.com/janedoe"}), ValueError), "a non-LinkedIn profile link is refused")
+c2 = R("PATCH", f"/api/lit/contacts/{zj['id']}", {"linkedin_url": "linkedin.com/in/jane-d?trk=x", "location": "Porto"})
+ok(c2["linkedin_url"] == "https://www.linkedin.com/in/jane-d" and c2["url_status"] == "user_provided" and c2["location"] == "Porto", "a pasted link is normalised and marked as added by you")
+
+# profile lookup with web search
+lo = R("GET", "/api/lit/opportunities")[0]
+oid = [o for o in R("GET", "/api/lit/opportunities") if o["company"] == "Acme Protocol"][0]["id"]
+jid = [c for c in R("GET", f"/api/lit/opportunities/{oid}")["contacts"] if c["name"] == "Jane Doe"][0]["id"]
+res = R("POST", f"/api/lit/opportunities/{oid}/find_profiles", {"contact_id": jid})
+jd = [c for c in res["contacts"] if c["name"] == "Jane Doe"][0]
+ok(res["lookup"]["found"] == 1 and jd["linkedin_url"] == "https://www.linkedin.com/in/jane-doe-123" and jd["url_status"] == "web_search" and "Acme Protocol" in jd["url_evidence"] and jd["location"] in ("Lisbon", "Porto"), "lookup keeps a URL only when it is in the search results, with the result title as evidence")
+gid = [o for o in R("GET", "/api/career/opportunities") if o["contact"] is None or not o["contact"]["name"]]
+gamma = R("POST", "/api/career/signals", {"kind": "job_posting", "body": "Gamma hiring SDR remote LATAM", "company": "Gamma", "analyze": True})
+gopp = gamma["result"]["opportunity_id"]
+db.agent_db(car).run("DELETE FROM contacts WHERE opportunity_id=?", (gopp,))
+res = R("POST", f"/api/career/opportunities/{gopp}/find_profiles", {})
+names = {c["name"]: c for c in res["contacts"]}
+ok("Maria Silva" in names and "Invented Person" not in names and names["Maria Silva"]["basis"] == "public_web", "discovery finds the decision-maker and drops a person whose URL is not in the results")
+
+# automatic lookup after a run: once per lead, within the daily cap
+db.set_setting("profile_lookup", "1"); db.set_setting("profile_lookups_per_day", "1")
+ld0 = db.agent_db(lit)
+ld0.run("UPDATE contacts SET linkedin_url='', url_status='missing' WHERE name='Jane Doe'")
+ld0.run("DELETE FROM events WHERE type='profile_lookup'")
+errs = []; engine.auto_lookups(lit, errs); engine.auto_lookups(lit, errs)
+ok(ld0.val("SELECT COUNT(*) FROM events WHERE type='profile_lookup'") == 1 and not errs, "auto lookup runs for the best new lead and respects the daily cap")
+db.set_setting("profile_lookup", "0")
+
+# review decisions and categories
+R("POST", f"/api/lit/opportunities/{rej['opp_id']}/decision", {"decision": "pursue"})
+ok([r for r in R("GET", "/api/leads?agent=lit".split("?")[0])["rows"] if r["opp_id"] == rej["opp_id"]][0]["category"] == "pipeline", "pursuing an AI-rejected lead moves it into the pipeline")
+R("POST", "/api/leads/bulk", {"action": "dismissed", "items": [{"agent": "lit", "opp_id": rej["opp_id"]}]})
+ok([r for r in R("GET", "/api/leads")["rows"] if r["opp_id"] == rej["opp_id"] and r["agent"] == "lit"][0]["category"] == "dismissed", "dismissed leads stay visible under Dismissed")
+ps = R("POST", "/api/lit/signals", {"kind": "note", "body": "Unanalysed thing about Delta"})["id"]
+row = lambda: [r for r in R("GET", "/api/leads")["rows"] if r["signal_id"] == ps and r["agent"] == "lit"][0]
+ok(row()["category"] == "pending", "a signal waiting for analysis is listed as pending")
+R("POST", f"/api/lit/signals/{ps}/dismiss"); d1 = row()["category"]
+R("POST", f"/api/lit/signals/{ps}/restore"); ok(d1 == "dismissed" and row()["category"] == "pending", "dismissed signals can be restored")
+ok(app.route("GET", "/api/leads", {"category": ["review"], "q": ["maria"]}, {})["total"] >= 1, "search and category filters work server-side")
+
+# history is kept, failed analyses stop retrying
+ld = db.agent_db(lit)
+old_id = ld.insert("signals", {"created_at": "2020-01-01T00:00:00Z", "status": "irrelevant", "error": "old", "dedupe": "old1", "title": "Old"})
+fail_id = ld.insert("signals", {"created_at": db.now(), "status": "error", "error": "boom", "dedupe": "f1", "title": "F", "attempts": 3})
+engine.run_monitor(lit, "manual")
+ok(ld.val("SELECT COUNT(*) FROM signals WHERE id=?", (old_id,)) == 1, "old rejected signals are no longer deleted")
+ld.run("UPDATE signals SET status='new', error=NULL WHERE status='analyzing' OR (status='error' AND COALESCE(attempts,0)<?)", (app.MAX_ATTEMPTS,))
+ok(ld.val("SELECT status FROM signals WHERE id=?", (fail_id,)) == "error", "a signal that failed 3 times is not re-analysed (no repeated billing)")
+
+# performance: bounded round trips, cached repeats
+for i in range(300):
+    sid = ld.insert("signals", {"created_at": db.now(), "status": "analyzed", "dedupe": f"p{i}", "title": "t"})
+    oid2 = ld.insert("opportunities", {"created_at": db.now(), "signal_id": sid, "company": f"C{i}", "score": i % 100, "stage": "Qualified", "parked": 0, "decision": "new", "ai_verdict": "relevant", "role": {}, "services": []})
+    ld.insert("contacts", {"opportunity_id": oid2, "name": f"P{i}", "title": "CEO"})
+db.reset_stats(); first = R("GET", "/api/leads"); q1 = db.stats()[0]
+db.reset_stats(); R("GET", "/api/leads"); q2 = db.stats()[0]
+db.reset_stats(); R("GET", "/api/overview"); q3 = db.stats()[0]
+ok(first["counts"]["all"] > 300 and q1 <= 8 and q2 == 0, f"leads page: {q1} queries for {first['counts']['all']} leads, 0 when repeated")
+ok(q3 <= 24, f"dashboard data: {q3} queries regardless of lead count")
+
+# static assets: versioned and compressed
+srv2_code, _, hd2 = http("GET", "/healthz")
+req = urllib.request.Request(BASE + "/", headers={"Accept-Encoding": "gzip"})
+with urllib.request.urlopen(req) as r_:
+    import gzip as _gz
+    html = _gz.decompress(r_.read()).decode() if r_.headers.get("Content-Encoding") == "gzip" else r_.read().decode()
+    ok("app.js?v=" in html and r_.headers["Cache-Control"] == "no-cache", "index.html points to versioned assets")
+js = html.split('src="')[1].split('"')[0]
+with urllib.request.urlopen(urllib.request.Request(BASE + "/" + js, headers={"Accept-Encoding": "gzip"})) as r_:
+    ok(r_.headers.get("Content-Encoding") == "gzip" and "immutable" in r_.headers["Cache-Control"], "app.js is gzipped and cached long-term")
 
 # --- without a key nothing is faked
 os.environ["ANTHROPIC_API_KEY"] = ""
