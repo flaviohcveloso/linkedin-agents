@@ -1,4 +1,14 @@
+# Secrets and local data
 .env
 data/
+
+# Python
 __pycache__/
 *.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
